@@ -1,0 +1,38 @@
+{
+  "name": "geonames-mcp-server",
+  "version": "0.1.0",
+  "description": "GeoNames gazetteer: place-name search, administrative hierarchy, nearby places and reverse geocoding, postal codes, and country info over 11M+ place names.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/geonames-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/geonames-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "geonames",
+    "gazetteer",
+    "geocoding",
+    "reverse-geocoding",
+    "postal-code",
+    "administrative-divisions",
+    "toponym"
+  ],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "geonames-mcp-server",
+    "shortDescription": "GeoNames gazetteer: place-name search, administrative hierarchy, nearby places and reverse geocoding, postal codes, and country info over 11M+ place names.",
+    "longDescription": "Global geographical gazetteer built on the GeoNames web services. Search 11M+ place names by name, feature class, and country; climb the administrative parent chain from a neighborhood to its continent or list a unit's children; reverse-geocode a coordinate to its enclosing country and subdivision plus nearby populated places; resolve postal codes to coordinates across 80+ countries; and read country metadata such as ISO codes, capital, currency, and languages. Requires a free GeoNames username. Data is CC BY, attributed to GeoNames.",
+    "developerName": "cyanheads",
+    "category": "data",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/cyanheads/geonames-mcp-server",
+    "defaultPrompt": []
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "geonames-mcp-server",
+  "version": "0.1.0",
+  "description": "GeoNames gazetteer: place-name search, administrative hierarchy, nearby places and reverse geocoding, postal codes, and country info over 11M+ place names.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/geonames-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/geonames-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "geonames",
+    "gazetteer",
+    "geocoding",
+    "reverse-geocoding",
+    "postal-code",
+    "administrative-divisions",
+    "toponym"
+  ],
+  "mcpServers": {
+    "geonames-mcp-server": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@cyanheads/geonames-mcp-server"
+      ],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}
