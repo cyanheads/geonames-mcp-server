@@ -6,7 +6,8 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import {
   brokenStreamResponse,
   CALLER_USERNAME,
@@ -222,7 +223,7 @@ describe('status 14, 21, 24, 25, 27: rejected parameters', () => {
       ),
     );
     expect(error.message).toBe(
-      'GeoNames rejected a parameter: bad  value \\[x\\](http://evil.test) &lt;b&gt;',
+      'GeoNames rejected a parameter: bad  value \\[x\\](http\\[:\\]//evil.test) &lt;b&gt;',
     );
     expect(error.message).not.toMatch(/[\r\n]/);
   });
@@ -495,35 +496,55 @@ describe('no account name anywhere', () => {
     }
   });
 
-  it('keeps the username out of success-path log records', async () => {
-    const { service } = searchService(() => jsonResponse(EMPTY_GEONAMES_BODY));
-    const ctx = makeContext();
-    await service.search(SEARCH, service.resolveAccount(CALLER_USERNAME), ctx);
-    const records = logRecords(ctx);
-    expect(records).toEqual([
-      {
-        level: 'debug',
-        msg: 'GeoNames response',
-        data: {
+  describe('the per-response log record', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** The fields of each `GeoNames response` record the process logger received. */
+    const responseRecords = (debug: MockInstance<typeof logger.debug>) =>
+      debug.mock.calls
+        .filter(([message]) => message === 'GeoNames response')
+        .map(([, context]) => (context as { extra?: unknown } | undefined)?.extra);
+
+    it('goes to the process logger, never ctx.log, and carries no username', async () => {
+      const debug = vi.spyOn(logger, 'debug');
+      const { service } = searchService(() => jsonResponse(EMPTY_GEONAMES_BODY));
+      const ctx = makeContext();
+      await service.search(SEARCH, service.resolveAccount(CALLER_USERNAME), ctx);
+      expect(logRecords(ctx)).toEqual([]);
+      const records = responseRecords(debug);
+      expect(records).toEqual([
+        {
           endpoint: 'searchJSON',
           httpStatus: 200,
           bodyBytes: expect.any(Number),
           account: 'caller',
         },
-      },
-    ]);
-    expect(JSON.stringify(records)).not.toContain(CALLER_USERNAME);
-    expect(JSON.stringify(records)).not.toContain('username');
-  });
+      ]);
+      expect(JSON.stringify(records)).not.toContain(CALLER_USERNAME);
+      expect(JSON.stringify(records)).not.toContain('username');
+    });
 
-  it('reports the response size the log record carries', async () => {
-    const body = JSON.stringify(EMPTY_GEONAMES_BODY);
-    const { service } = searchService(() => textResponse(body, 200, 'application/json'));
-    const ctx = makeContext();
-    await service.search(SEARCH, service.resolveAccount(undefined), ctx);
-    expect(logRecords(ctx)[0]?.data).toMatchObject({
-      bodyBytes: new TextEncoder().encode(body).byteLength,
-      account: 'server',
+    it('reports the response size', async () => {
+      const debug = vi.spyOn(logger, 'debug');
+      const body = JSON.stringify(EMPTY_GEONAMES_BODY);
+      const { service } = searchService(() => textResponse(body, 200, 'application/json'));
+      await service.search(SEARCH, service.resolveAccount(undefined), makeContext());
+      expect(responseRecords(debug)[0]).toMatchObject({
+        bodyBytes: new TextEncoder().encode(body).byteLength,
+        account: 'server',
+      });
+    });
+
+    it('leaves the client the same log records for a cache hit as for a miss', async () => {
+      const { fetch, service } = searchService(() => jsonResponse(SEARCH_BODY));
+      const miss = makeContext();
+      const hit = makeContext();
+      await service.search(SEARCH, service.resolveAccount(undefined), miss);
+      await service.search(SEARCH, service.resolveAccount('made-up-user'), hit);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(logRecords(hit)).toEqual(logRecords(miss));
     });
   });
 });

@@ -609,8 +609,54 @@ describe('format()', () => {
     ]);
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);
-    expect(rendered).toContain('\\[x\\](http://e.test)');
+    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(rendered.split('\n').filter((line) => line.startsWith('- injected'))).toEqual([]);
     expect(allText(result)).not.toMatch(/\r/);
+  });
+
+  describe('invisible characters and bare URLs in names', () => {
+    const cp = (codePoint: number) => String.fromCodePoint(codePoint);
+    const TAG_A = cp(0xe0041);
+    const ZWSP = cp(0x200b);
+    const WORD_JOINER = cp(0x2060);
+    const BOM = cp(0xfeff);
+    const SOFT_HYPHEN = cp(0x00ad);
+    const ZWNJ = cp(0x200c);
+    const ZWJ = cp(0x200d);
+
+    it('drops tag characters from both surfaces and every invisible format character from content[]', async () => {
+      serve({
+        ...GET_SEATTLE_BODY,
+        name: `Sea${ZWSP}ttle${TAG_A}${WORD_JOINER}${BOM}${SOFT_HYPHEN}`,
+        alternateNames: [{ name: `می${ZWNJ}خواهم ক্${ZWJ}ষ${TAG_A}`, lang: 'fa' }],
+      });
+      const result = await run({ geonameId: '5809844' });
+      const place = placeOf(result);
+      expect(place.name).toBe(`Sea${ZWSP}ttle${WORD_JOINER}${BOM}${SOFT_HYPHEN}`);
+      expect(place.alternateNames).toEqual([{ name: `می${ZWNJ}خواهم ক্${ZWJ}ষ`, lang: 'fa' }]);
+
+      const rendered = allText(result);
+      expect(rendered).toContain('## Seattle');
+      expect(rendered).toContain(`می${ZWNJ}خواهم ক্${ZWJ}ষ`);
+      for (const char of [TAG_A, ZWSP, WORD_JOINER, BOM, SOFT_HYPHEN]) {
+        expect(rendered).not.toContain(char);
+      }
+    });
+
+    it('prints a URL held in a name so it does not render as a bare URL', async () => {
+      serve({
+        ...GET_SEATTLE_BODY,
+        name: 'Seattle https://example.com',
+        toponymName: 'Seattle www.example.com',
+      });
+      const result = await run({ geonameId: '5809844' });
+      expect(placeOf(result).name).toBe('Seattle https://example.com');
+      const rendered = textOf(result);
+      expect(rendered).not.toContain('https://example.com');
+      expect(rendered).not.toContain('www.example.com');
+      expect(rendered).toContain('## Seattle https\\[:\\]//example.com');
+      expect(rendered).toContain('- **Toponym name:** Seattle www\\[.\\]example.com');
+      expect(rendered).toContain('- **Wikipedia:** https://en.wikipedia.org/wiki/Seattle');
+    });
   });
 });

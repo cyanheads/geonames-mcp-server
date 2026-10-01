@@ -1,11 +1,14 @@
 /**
  * @fileoverview Shared tool inputs: blank-as-unset, comma-list normalization, id and URL
- * reduction, bounds, the strict name matcher, and local pagination.
+ * reduction, bounds, the strict name matcher, local pagination, and the argument names
+ * redacted from the failed-call payload record.
  * @module tests/shared/shared-inputs.test
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { describe, expect, it } from 'vitest';
+import { sanitization } from '@cyanheads/mcp-ts-core/utils';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import {
   blankAsUnset,
   citiesInput,
@@ -23,6 +26,7 @@ import {
   offsetInput,
   paginate,
   USERNAME_ALIASES,
+  USERNAME_LOG_FIELDS,
 } from '@/mcp-server/tools/shared-inputs.js';
 
 /** `schema.safeParse` on a value, returning the parsed data or the issue paths. */
@@ -150,6 +154,48 @@ describe('geonamesUsernameInput', () => {
 
   it('maps the username alias onto geonamesUsername', () => {
     expect(USERNAME_ALIASES).toEqual({ username: 'geonamesUsername' });
+  });
+});
+
+describe('USERNAME_LOG_FIELDS', () => {
+  beforeAll(() => {
+    sanitization.setSensitiveFields(USERNAME_LOG_FIELDS);
+  });
+
+  /** The arguments as the failed-call payload record writes them. */
+  const logged = (args: Record<string, unknown>): unknown =>
+    JSON.parse(sanitization.serializeForLogging(args, 16_384).text);
+
+  it.each([
+    'geonamesUsername',
+    'username',
+    'GEONAMES_USERNAME',
+    'geonames-username',
+    'GeoNamesUserName',
+    'User_Name',
+    'apiUsername',
+    'geonamesUser',
+    'geonames_user',
+    'GEONAMES_USER',
+    'geonamesAccount',
+    'GeoNamesAccount',
+    'GEONAMES_ACCOUNT',
+    'user',
+    'USER',
+    'account',
+    'Account',
+  ])('redacts an argument named %s', (key) => {
+    expect(logged({ [key]: 'made-up-account', query: 'Seattle' })).toEqual({
+      [key]: '[REDACTED]',
+      query: 'Seattle',
+    });
+  });
+
+  it('keeps every other tool argument readable', () => {
+    const keys = new Set(allToolDefinitions.flatMap((tool) => Object.keys(tool.input.shape)));
+    keys.delete('geonamesUsername');
+    const args = Object.fromEntries([...keys].map((key) => [key, 'kept']));
+    expect(logged(args)).toEqual(args);
   });
 });
 

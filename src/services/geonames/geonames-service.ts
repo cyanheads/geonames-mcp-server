@@ -12,7 +12,9 @@ import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   createPacer,
   defaultIsTransient,
+  logger,
   type Pacer,
+  withExtra,
   withRetry,
 } from '@cyanheads/mcp-ts-core/utils';
 import { ResponseCache } from './response-cache.js';
@@ -67,7 +69,7 @@ const ATTEMPT_TIMEOUT_MS = 10_000;
 const LADDER_DEADLINE_MS = 20_000;
 const MAX_QUEUE_WAIT_MS = 10_000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
-const MAX_PACERS = 256;
+const MAX_CALLER_PACERS = 256;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
@@ -76,6 +78,12 @@ const EARTH_GEONAME_ID = 6_295_630;
 
 /** HTTP statuses whose body is read as a GeoNames payload (status 10 → 401, 11 → 404). */
 const READABLE_STATUSES = new Set([200, 401, 404]);
+
+/**
+ * The Unicode Tags block: invisible to people, readable by models, and never part of a
+ * place name, so no decoded GeoNames string keeps one.
+ */
+const TAG_CHARACTERS = /[\u{e0000}-\u{e007f}]/gu;
 
 /** The fetch signature the service calls; global `fetch` and test fakes both satisfy it. */
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
@@ -166,8 +174,10 @@ export class GeoNamesService {
   readonly #createPacer: typeof createPacer;
   readonly #fetch: FetchLike;
   readonly #flights = new Map<string, Flight>();
+  /** Caller-account pacers, least recently used first. */
   readonly #pacers = new Map<string, Pacer>();
   readonly #serverAccount: GeoNamesAccount | undefined;
+  #serverPacer: Pacer | undefined;
 
   constructor(options: GeoNamesServiceOptions = {}) {
     this.#baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
@@ -201,6 +211,8 @@ export class GeoNamesService {
 
   /** Disposes every pacer, rejecting queued waiters. Wired through `teardown`. */
   dispose(): void {
+    this.#serverPacer?.dispose();
+    this.#serverPacer = undefined;
     for (const pacer of this.#pacers.values()) pacer.dispose();
     this.#pacers.clear();
   }
@@ -582,7 +594,7 @@ export class GeoNamesService {
     account: GeoNamesAccount,
     ctx: Context,
   ): Promise<{ bytes: number; value: T }> {
-    const pacer = this.#pacerFor(account.key);
+    const pacer = this.#pacerFor(account);
     const ladder = withRetry(
       async ({ remainingMs, signal }) => {
         try {
@@ -615,7 +627,13 @@ export class GeoNamesService {
     });
   }
 
-  /** One paced attempt: fetch, bounded read, JSON, status mapping, row parse. */
+  /**
+   * One paced attempt: fetch, bounded read, JSON, status mapping, row parse. A failure
+   * while the call is cancelled or out of time surfaces as the abort reason, so the
+   * runtime's own error, which can carry the request URL, never enters an error chain.
+   * The response record goes to the process logger only: through `ctx.log` it would
+   * tell the client a cache miss from a hit.
+   */
   async #attempt<T>(
     spec: CallSpec<T>,
     account: GeoNamesAccount,
@@ -635,21 +653,28 @@ export class GeoNamesService {
         redirect: 'manual',
         signal: attemptSignal,
       });
-    } catch (error) {
-      if (signal.aborted) throw error;
+    } catch {
+      signal.throwIfAborted();
       throw timer.aborted ? upstreamTimedOut() : upstreamUnreachable();
     }
     const { bytes, text } = await this.#readBody(response, signal, timer);
-    ctx.log.debug('GeoNames response', {
-      endpoint: spec.endpoint,
-      httpStatus: response.status,
-      bodyBytes: bytes,
-      account: account.source,
-    });
+    logger.debug(
+      'GeoNames response',
+      withExtra(ctx, {
+        endpoint: spec.endpoint,
+        httpStatus: response.status,
+        bodyBytes: bytes,
+        account: account.source,
+      }),
+    );
     return { bytes, value: spec.parse(this.#toPayload(response.status, text, account)) };
   }
 
-  /** Reads the body under the byte ceiling. A redirect, overflow, or broken stream is unreadable. */
+  /**
+   * Reads the body under the byte ceiling. A redirect, overflow, or broken stream is
+   * unreadable; a failure while the call is cancelled or out of time surfaces as the
+   * abort reason, as in `#attempt`.
+   */
   async #readBody(response: Response, signal: AbortSignal, timer: AbortSignal): Promise<ReadBody> {
     if (response.status < 200 || (response.status >= 300 && response.status < 400)) {
       await response.body?.cancel().catch(() => undefined);
@@ -671,17 +696,23 @@ export class GeoNamesService {
         chunk = await reader.read();
       }
     } catch (error) {
-      if (reasonOf(error) === 'upstream_unreadable' || signal.aborted) throw error;
+      if (reasonOf(error) === 'upstream_unreadable') throw error;
+      signal.throwIfAborted();
       throw timer.aborted ? upstreamTimedOut() : upstreamUnreadable();
     }
     return { bytes, text: new TextDecoder().decode(Buffer.concat(chunks)) };
   }
 
-  /** Classifies a read body: a status envelope by its value, else the HTTP accept-list. */
+  /**
+   * Classifies a read body: a status envelope by its value, else the HTTP accept-list.
+   * Every decoded string loses its Unicode tag characters.
+   */
   #toPayload(httpStatus: number, text: string, account: GeoNamesAccount): Payload {
     let json: unknown;
     try {
-      json = JSON.parse(text);
+      json = JSON.parse(text, (_key, value: unknown) =>
+        typeof value === 'string' ? value.replace(TAG_CHARACTERS, '') : value,
+      );
     } catch {
       json = undefined;
     }
@@ -698,28 +729,39 @@ export class GeoNamesService {
     return { kind: 'body', body: json };
   }
 
-  /** The account's pacer, created on first use; the least recently used is disposed past 256. */
-  #pacerFor(key: string): Pacer {
-    const existing = this.#pacers.get(key);
+  /**
+   * The account's pacer, created on first use. The server's lives outside the caller map
+   * and is never evicted. Past 256 callers the least recently used caller pacer leaves the
+   * map undisposed: its timers are unref'd, so work already queued on it drains.
+   */
+  #pacerFor(account: GeoNamesAccount): Pacer {
+    if (account.source === 'server') {
+      this.#serverPacer ??= this.#newPacer();
+      return this.#serverPacer;
+    }
+    const existing = this.#pacers.get(account.key);
     if (existing) {
-      this.#pacers.delete(key);
-      this.#pacers.set(key, existing);
+      this.#pacers.delete(account.key);
+      this.#pacers.set(account.key, existing);
       return existing;
     }
-    if (this.#pacers.size >= MAX_PACERS) {
-      const [oldestKey, oldest] = this.#pacers.entries().next().value as [string, Pacer];
-      this.#pacers.delete(oldestKey);
-      oldest.dispose();
+    if (this.#pacers.size >= MAX_CALLER_PACERS) {
+      this.#pacers.delete(this.#pacers.keys().next().value as string);
     }
-    const pacer = this.#createPacer({
+    const pacer = this.#newPacer();
+    this.#pacers.set(account.key, pacer);
+    return pacer;
+  }
+
+  /** One account's pacer, built from the design's pacing parameters. */
+  #newPacer(): Pacer {
+    return this.#createPacer({
       name: 'geonames',
       maxConcurrent: 4,
       minStartGapMs: 100,
       limits: [{ requests: 1_000, perMs: HOUR_MS }],
       cooldown: { baseMs: 60_000, maxMs: HOUR_MS },
     });
-    this.#pacers.set(key, pacer);
-    return pacer;
   }
 }
 

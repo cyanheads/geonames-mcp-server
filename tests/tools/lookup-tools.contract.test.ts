@@ -400,7 +400,7 @@ describe.each(CASES)('$name', (toolCase) => {
       installService(routes(failWith(14, 'bad\r\n## value [x](http://e.test) <b>')));
       const error = errorOf(await call(input));
       expect(error.message).toBe(
-        'GeoNames rejected a parameter: bad  ## value \\[x\\](http://e.test) &lt;b&gt;',
+        'GeoNames rejected a parameter: bad  ## value \\[x\\](http\\[:\\]//e.test) &lt;b&gt;',
       );
     });
   });

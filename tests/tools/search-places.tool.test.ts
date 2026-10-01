@@ -873,7 +873,7 @@ describe('zero-result notices', () => {
   it('flattens and escapes a hostile query in the notice and effectiveQuery', async () => {
     const hostile = 'evil\r\n## Heading [x](http://e.test) <b>';
     const result = await empty({ query: hostile, match: 'exact_name' });
-    const echoed = 'evil  ## Heading \\[x\\](http://e.test) &lt;b&gt;';
+    const echoed = 'evil  ## Heading \\[x\\](http\\[:\\]//e.test) &lt;b&gt;';
     expect(result.effectiveQuery).toBe(`exact_name "${echoed}"`);
     expect(result.notice).toContain(`No place is named exactly "${echoed}"`);
     expect(result.notice).not.toMatch(/[\r\n]/);
@@ -1037,7 +1037,7 @@ describe('format()', () => {
     expect(successOf<Page>(result).places[0]?.name).toBe(hostile);
     expect(tableRows(rendered)).toHaveLength(4);
     expect(headingLines(rendered)).toEqual(['## GeoNames places']);
-    expect(rendered).toContain('\\[x\\](http://e.test)');
+    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);

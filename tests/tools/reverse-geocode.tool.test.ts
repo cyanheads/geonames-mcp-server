@@ -706,7 +706,9 @@ describe('notices', () => {
         jsonResponse({ ocean: { name: 'Sea [x](http://e.test)\r\n## Heading <b>', geonameId: 1 } }),
     });
     const result = page(await run({ ...SEA, nearbyLimit: 0 }));
-    expectInOrder(result.notice, ['it lies in Sea \\[x\\](http://e.test)  ## Heading &lt;b&gt;']);
+    expectInOrder(result.notice, [
+      'it lies in Sea \\[x\\](http\\[:\\]//e.test)  ## Heading &lt;b&gt;',
+    ]);
     expect(result.notice).not.toMatch(/[\r\n]/);
     expect(result.ocean?.name).toBe('Sea [x](http://e.test)\r\n## Heading <b>');
   });
@@ -1509,7 +1511,7 @@ describe('format()', () => {
       '### Nearest populated places (nearbyKind populated_places)',
       '### Timezone',
     ]);
-    expect(rendered).toContain('\\[x\\](http://e.test)');
+    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain('<s>');

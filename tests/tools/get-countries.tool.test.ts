@@ -595,7 +595,7 @@ describe('format()', () => {
     expect(successOf<Page>(result).countries[0]?.countryName).toBe(hostile);
     expect(tableRows(rendered)).toHaveLength(4);
     expect(headingLines(rendered)).toEqual(['## GeoNames countries']);
-    expect(rendered).toContain('\\[x\\](http://e.test)');
+    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);
     const cells = (tableRows(rendered)[2] ?? '').replace(/\\\|/g, '').split('|');

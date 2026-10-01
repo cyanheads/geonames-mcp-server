@@ -81,6 +81,23 @@ export const geonamesUsernameInput = blankAsUnset(
 /** Spread into a tool's `inputAliases`. */
 export const USERNAME_ALIASES = { username: 'geonamesUsername' } as const;
 
+/**
+ * Argument names `setup()` registers with `sanitization.setSensitiveFields`, so the
+ * failed-call payload record redacts a username sent under a near-miss key. The framework
+ * matches a key by its lower-cased alphanumerics and by its camelCase, snake_case, or
+ * kebab-case words: `user` and `account` cover `geonames_user` and `GeoNamesAccount`, and
+ * the run-together names cover all-caps keys such as `GEONAMES_USER`, which split into
+ * single letters.
+ */
+export const USERNAME_LOG_FIELDS = [
+  'geonamesUsername',
+  'username',
+  'geonamesUser',
+  'geonamesAccount',
+  'user',
+  'account',
+];
+
 /** A geonames.org page or Linked Data URL; capture group 1 is the id. */
 const GEONAMES_URL = /^(?:https?:\/\/)?(?:www\.|sws\.)?geonames\.org\/(\d+)(?:[/?#].*)?$/i;
 

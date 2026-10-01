@@ -568,7 +568,10 @@ describe('notices', () => {
       const hostile = page(
         await run({ mode: 'place_name', placeName: 'q[x](http://e.test) <b>\r\n## Heading' }),
       );
-      expectInOrder(hostile.notice, ['q\\[x\\](http://e.test) &lt;b&gt;  ## Heading', 'placeName']);
+      expectInOrder(hostile.notice, [
+        'q\\[x\\](http\\[:\\]//e.test) &lt;b&gt;  ## Heading',
+        'placeName',
+      ]);
       expect(hostile.notice).not.toMatch(/[\r\n]/);
     });
 
@@ -895,7 +898,7 @@ describe('format()', () => {
     expect(page(result).postalCodes[0]?.placeName).toBe(hostile);
     expect(tableRows(rendered)).toHaveLength(4);
     expect(headingLines(rendered)).toEqual(['## GeoNames postal codes (mode code)']);
-    expect(rendered).toContain('\\[x\\](http://e.test)');
+    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).toContain('&lt;b&gt;x&lt;/b&gt;');
     expect(rendered).not.toContain('<img');
@@ -1011,7 +1014,7 @@ describe('declared error contracts', () => {
     failing(14, 'bad\r\n## Heading [x](http://e.test) <b>');
     const error = errorOf(await run({ mode: 'code', postalCode: '98101' }));
     expect(error.message).not.toMatch(/[\r\n]/);
-    expect(error.message).toContain('\\[x\\](http://e.test)');
+    expect(error.message).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(error.message).toContain('&lt;b&gt;');
     expect(error.message).not.toContain('<b>');
   });

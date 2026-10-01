@@ -17,6 +17,7 @@ import {
   initGeoNamesService,
 } from '@/services/geonames/geonames-service.js';
 import {
+  BASE_URL,
   CALLER_USERNAME,
   CHILDREN_ENGLAND_BODY,
   COUNTRY_INFO_BODY,
@@ -41,6 +42,7 @@ import {
   inertPacer,
   makeContext,
   makeService,
+  type Responder,
   requestedUrls,
   routedFetch,
   surfaces,
@@ -375,11 +377,22 @@ describe('retry ladder and deadline', () => {
     });
   });
 
+  /** Shaped like a Bun fetch failure: the request URL in `path`, the message, and the cause. */
+  const connectionFailure = (url: string) =>
+    Object.assign(
+      new TypeError(`fetch failed: connect ECONNREFUSED ${url}`, {
+        cause: new Error(`getaddrinfo ENOTFOUND ${url}`),
+      }),
+      { code: 'ConnectionRefused', path: url },
+    );
+
+  /** Everything `util.inspect` can reach on an error: hidden properties and the whole cause chain. */
+  const inspected = (error: unknown) =>
+    inspect(error, { depth: Number.POSITIVE_INFINITY, showHidden: true });
+
   it('maps a rejected fetch to upstream_unreachable without leaking the URL or the account', async () => {
     const fetch = vi.fn(async (url: string) => {
-      throw new TypeError(`fetch failed: connect ECONNREFUSED ${url}`, {
-        cause: new Error(`getaddrinfo ENOTFOUND ${url}`),
-      });
+      throw connectionFailure(url);
     });
     const service = makeService(fetch);
     const probe = makeContext();
@@ -396,6 +409,71 @@ describe('retry ladder and deadline', () => {
     const everything = surfaces(error, probe);
     expect(everything).not.toContain(CALLER_USERNAME);
     expect(everything).not.toContain('ECONNREFUSED');
+    expect(inspected(error)).not.toContain(CALLER_USERNAME);
+    expect(inspected(error)).not.toContain(BASE_URL);
+  });
+
+  describe('a connection failure landing as the call is cancelled or runs out of time', () => {
+    /** A request that hangs, then fails with the URL-bearing error when its signal aborts. */
+    const requestFailsOnAbort: Responder = (url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(connectionFailure(url.href)));
+      });
+
+    /** A 200 whose body stream fails with the URL-bearing error when the signal aborts. */
+    const bodyFailsOnAbort: Responder = (url, init) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(stream) {
+            init?.signal?.addEventListener('abort', () =>
+              stream.error(connectionFailure(url.href)),
+            );
+          },
+        }),
+        { status: 200 },
+      );
+
+    const sinks: [string, Responder][] = [
+      ['the request', requestFailsOnAbort],
+      ['the body read', bodyFailsOnAbort],
+    ];
+
+    it.each(sinks)('surfaces a cancellation during %s as its own reason', async (_, responder) => {
+      const controller = new AbortController();
+      const fetch = routedFetch({ oceanJSON: responder });
+      const service = makeService(fetch);
+      const caught = service
+        .ocean(1, 2, service.resolveAccount(CALLER_USERNAME), makeContext(controller.signal))
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      await vi.advanceTimersByTimeAsync(10);
+      const reason = new Error('client went away');
+      controller.abort(reason);
+      await vi.advanceTimersByTimeAsync(10);
+      const error = await caught;
+      expect(error).toBe(reason);
+      expect(inspected(error)).not.toContain(CALLER_USERNAME);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(sinks)('keeps it out of the deadline error during %s', async (_, responder) => {
+      const fetch = routedFetch({ oceanJSON: responder });
+      const service = makeService(fetch);
+      const caught = service
+        .ocean(1, 2, service.resolveAccount(CALLER_USERNAME), makeContext())
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      await vi.advanceTimersByTimeAsync(20_001);
+      const error = (await caught) as McpError;
+      expect(error.data?.reason).toBe('upstream_timeout');
+      expect((error.cause as McpError).data?.reason).toBe('retry_deadline_exceeded');
+      expect(inspected(error)).not.toContain(CALLER_USERNAME);
+      expect(inspected(error)).not.toContain(BASE_URL);
+    });
   });
 });
 
@@ -491,7 +569,7 @@ describe('pacer map', () => {
     }
   });
 
-  it('evicts and disposes the least recently used pacer past 256 accounts', async () => {
+  it('drops the least recently used caller pacer past 256 callers, without disposing it', async () => {
     const { create, created, spy } = pacerFactory();
     const service = makeService(timezoneFetch(), { createPacer: create });
     for (let index = 0; index < 256; index++) await callTimezone(service, `caller-${index}`);
@@ -501,12 +579,12 @@ describe('pacer map', () => {
 
     await callTimezone(service, 'caller-256');
     expect(spy).toHaveBeenCalledTimes(257);
-    expect(created[1]?.dispose).toHaveBeenCalledTimes(1);
-    expect(created[0]?.dispose).not.toHaveBeenCalled();
+    await callTimezone(service, 'caller-0');
+    expect(spy).toHaveBeenCalledTimes(257);
 
     await callTimezone(service, 'caller-1');
     expect(spy).toHaveBeenCalledTimes(258);
-    expect(created[2]?.dispose).toHaveBeenCalledTimes(1);
+    expect(created.filter((entry) => entry.dispose.mock.calls.length > 0)).toEqual([]);
   });
 
   it('dispose() disposes every pacer and starts fresh afterwards', async () => {
@@ -639,6 +717,88 @@ describe('pacer map', () => {
       await vi.advanceTimersByTimeAsync(500);
       await expect(other).resolves.toMatchObject({ timezoneId: 'Europe/Paris' });
       expect(fetch).toHaveBeenCalledTimes(2);
+      service.dispose();
+    });
+
+    /** GeoNames' answer to a username it does not know: status 10 over HTTP 401. */
+    const unknownUser = () => jsonResponse(statusEnvelope(10, 'user does not exist.'), 401);
+
+    /** Calls the service once for each of `count` distinct made-up caller usernames. */
+    const callerBurst = (service: GeoNamesService, count: number) =>
+      Array.from({ length: count }, (_, index) =>
+        thrown(() => callTimezone(service, `made-up-${index}`)),
+      );
+
+    it('keeps the server cooldown through 257 distinct caller usernames', async () => {
+      const fetch = routedFetch({
+        timezoneJSON: (url) =>
+          url.searchParams.get('username') === SERVER_USERNAME
+            ? jsonResponse(statusEnvelope(19, quotaMessage('hour', SERVER_USERNAME)))
+            : unknownUser(),
+      });
+      const service = makeService(fetch, { createPacer });
+      const first = (await thrown(() => callTimezone(service))) as McpError;
+      expect(first.data).toMatchObject({ reason: 'quota_exhausted', window: 'hour' });
+
+      for (const call of callerBurst(service, 257)) await call;
+      const fetches = fetch.mock.calls.length;
+      expect(fetches).toBe(258);
+
+      const next = (await thrown(() => callTimezone(service))) as McpError;
+      expect(next.data).toMatchObject({
+        reason: 'quota_exhausted',
+        window: 'local',
+        account: 'server',
+      });
+      expect(fetch).toHaveBeenCalledTimes(fetches);
+      service.dispose();
+    });
+
+    it('completes queued server calls while 256 caller usernames pass through', async () => {
+      const fetch = routedFetch({
+        timezoneJSON: (url) =>
+          url.searchParams.get('username') === SERVER_USERNAME
+            ? jsonResponse(TIMEZONE_PARIS_BODY)
+            : unknownUser(),
+      });
+      const service = makeService(fetch, { createPacer });
+      const server = service.resolveAccount(undefined);
+      const queued = Array.from({ length: 6 }, (_, index) =>
+        service.timezone(index, index, server, ctx),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      const burst = callerBurst(service, 256);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await Promise.all(burst);
+
+      const settled = await Promise.allSettled(queued);
+      expect(settled.map((result) => result.status)).toEqual(Array(6).fill('fulfilled'));
+      const serverFetches = requestedUrls(fetch).filter(
+        (url) => url.searchParams.get('username') === SERVER_USERNAME,
+      );
+      expect(serverFetches).toHaveLength(6);
+      service.dispose();
+    });
+
+    it('finishes an in-flight retry after its caller pacer leaves the map', async () => {
+      const answers = [textResponse('busy', 503), jsonResponse(TIMEZONE_PARIS_BODY)];
+      const fetch = routedFetch({
+        timezoneJSON: (url) =>
+          url.searchParams.get('username') === CALLER_USERNAME
+            ? (answers.shift() as Response)
+            : unknownUser(),
+      });
+      const service = makeService(fetch, { createPacer });
+      const pending = callTimezone(service, CALLER_USERNAME);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      for (const call of callerBurst(service, 256)) await call;
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await expect(pending).resolves.toMatchObject({ timezoneId: 'Europe/Paris' });
+      expect(answers).toHaveLength(0);
       service.dispose();
     });
   });

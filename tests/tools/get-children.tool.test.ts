@@ -455,7 +455,7 @@ describe('nameContains', () => {
       await run({ geonameId: US, nameContains: 'q[x](http://e.test) <b>\r\n## Heading' }),
     );
     expectInOrder(result.notice, [
-      'q\\[x\\](http://e.test) &lt;b&gt;  ## Heading',
+      'q\\[x\\](http\\[:\\]//e.test) &lt;b&gt;  ## Heading',
       'without nameContains',
     ]);
     expect(result.notice).not.toMatch(/[\r\n]/);
@@ -754,7 +754,7 @@ describe('format()', () => {
     expect(headingLines(rendered)).toEqual([
       '## GeoNames children of geonameId 6252001 (administrative tree)',
     ]);
-    expect(rendered).toContain('\\[x\\](http://e.test)');
+    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);
@@ -855,7 +855,7 @@ describe('declared error contracts', () => {
     failing(14, 'bad\r\n## Heading [x](http://e.test) <b>');
     const error = errorOf(await run({ geonameId: US }));
     expect(error.message).not.toMatch(/[\r\n]/);
-    expect(error.message).toContain('\\[x\\](http://e.test)');
+    expect(error.message).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(error.message).toContain('&lt;b&gt;');
     expect(error.message).not.toContain('<b>');
   });

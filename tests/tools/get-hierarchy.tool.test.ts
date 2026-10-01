@@ -327,7 +327,7 @@ describe('format()', () => {
     expect(tableRows(rendered)).toHaveLength(8);
     const breadcrumb = rendered.split('\n')[2] ?? '';
     expect(breadcrumb.startsWith('Earth › Europe')).toBe(true);
-    expect(breadcrumb).toContain('\\[x\\](http://e.test) &lt;img src=x&gt;');
+    expect(breadcrumb).toContain('\\[x\\](http\\[:\\]//e.test) &lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);
     const cells = (tableRows(rendered)[7] ?? '').replace(/\\\|/g, '').split('|');

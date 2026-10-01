@@ -444,7 +444,7 @@ describe('feature_codes', () => {
       await run({ topic: 'feature_codes', nameContains: 'q[x](http://e.test) <b>\nzzz' }),
     );
     expect(result.notice).toBe(
-      'Nothing in feature_codes matches "q\\[x\\](http://e.test) &lt;b&gt; zzz"; call again without nameContains.',
+      'Nothing in feature_codes matches "q\\[x\\](http\\[:\\]//e.test) &lt;b&gt; zzz"; call again without nameContains.',
     );
     expect(result.notice).not.toMatch(/[\r\n]/);
   });
@@ -724,7 +724,7 @@ describe('format()', () => {
     expect(rendered.split('\n').filter((line) => line.startsWith('##'))).toEqual([
       '## GeoNames countries with postal-code data (topic postal_countries)',
     ]);
-    expect(rendered).toContain('\\[x\\](http://e.test)');
+    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);
