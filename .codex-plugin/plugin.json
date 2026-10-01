@@ -1,6 +1,6 @@
 {
   "name": "geonames-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Search GeoNames places, walk admin hierarchies, reverse geocode, get postal codes and country info.",
   "author": {
     "name": "cyanheads",
