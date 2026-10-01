@@ -26,6 +26,13 @@
       ],
       "environmentVariables": [
         {
+          "name": "GEONAMES_USERNAME",
+          "description": "GeoNames account used when a call passes no geonamesUsername. Free accounts must enable free web services on their geonames.org account page.",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -54,6 +61,13 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "GEONAMES_USERNAME",
+          "description": "GeoNames account used when a call passes no geonamesUsername. Free accounts must enable free web services on their geonames.org account page.",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": true
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",

@@ -17,7 +17,8 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "GEONAMES_USERNAME": "${user_config.geonames_username}"
       }
     }
   },
@@ -28,7 +29,16 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {},
+  "user_config": {
+    "geonames_username": {
+      "type": "string",
+      "title": "GeoNames username",
+      "description": "Your GeoNames account (free at geonames.org; enable free web services on its account page). Leave blank to pass geonamesUsername on each call instead.",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    }
+  },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

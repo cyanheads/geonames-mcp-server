@@ -23,6 +23,15 @@
     "administrative-divisions",
     "toponym"
   ],
+  "userConfig": {
+    "geonames_username": {
+      "type": "string",
+      "title": "GeoNames username",
+      "description": "Your GeoNames account (free at geonames.org; enable free web services on its account page). Leave blank to pass geonamesUsername on each call instead.",
+      "sensitive": true,
+      "default": ""
+    }
+  },
   "mcpServers": {
     "geonames-mcp-server": {
       "command": "npx",
@@ -31,7 +40,8 @@
         "@cyanheads/geonames-mcp-server"
       ],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "GEONAMES_USERNAME": "${user_config.geonames_username}"
       }
     }
   }
