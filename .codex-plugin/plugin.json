@@ -1,11 +1,11 @@
 {
   "name": "geonames-mcp-server",
   "version": "0.1.0",
-  "description": "GeoNames gazetteer: place-name search, administrative hierarchy, nearby places and reverse geocoding, postal codes, and country info over 11M+ place names.",
+  "description": "Search GeoNames places, walk admin hierarchies, reverse geocode, get postal codes and country info.",
   "author": {
-    "name": "Casey Hand",
+    "name": "cyanheads",
     "email": "casey@caseyjhand.com",
-    "url": "https://caseyjhand.com"
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/geonames-mcp-server#readme",
   "repository": "https://github.com/cyanheads/geonames-mcp-server",
@@ -25,8 +25,8 @@
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "geonames-mcp-server",
-    "shortDescription": "GeoNames gazetteer: place-name search, administrative hierarchy, nearby places and reverse geocoding, postal codes, and country info over 11M+ place names.",
-    "longDescription": "Global geographical gazetteer built on the GeoNames web services. Search 11M+ place names by name, feature class, and country; climb the administrative parent chain from a neighborhood to its continent or list a unit's children; reverse-geocode a coordinate to its enclosing country and subdivision plus nearby populated places; resolve postal codes to coordinates across 80+ countries; and read country metadata such as ISO codes, capital, currency, and languages. Requires a free GeoNames username. Data is CC BY, attributed to GeoNames.",
+    "shortDescription": "Search GeoNames places, walk admin hierarchies, reverse geocode, get postal codes and country info.",
+    "longDescription": "Geographic grounding from GeoNames, the gazetteer of 13M+ places worldwide, each keyed by a stable integer geonameId. Search places by name, country, feature class or code, population tier, and bounding box; read a place's full record with its admin chain, timezone, elevation, alternate names, postal codes, and IATA, UN/LOCODE, and Wikidata identifiers; climb a place's parent chain to its continent, or list a feature's children in the administrative, tourism, geography, or dependency tree; reverse-geocode a coordinate to its country and subdivisions, or the ocean offshore, with the nearest places or features and an optional timezone; look up postal codes by code, place name, or point across 122 countries; and read country facts such as ISO codes, capital, population, languages, and currency. Calls spend credits from a free GeoNames account, set once as GEONAMES_USERNAME or passed per call as geonamesUsername. GeoNames data is CC BY 4.0: credit GeoNames when passing results on.",
     "developerName": "cyanheads",
     "category": "data",
     "capabilities": [

@@ -1,6 +1,6 @@
 # geonames-mcp-server - Directory Structure
 
-Generated on: 2026-10-01 08:11:34
+Generated on: 2026-10-01 09:17:43
 
 ```text
 geonames-mcp-server/
@@ -24,6 +24,7 @@ geonames-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -195,12 +196,14 @@ geonames-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json

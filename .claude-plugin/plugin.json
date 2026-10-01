@@ -2,11 +2,11 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "geonames-mcp-server",
   "version": "0.1.0",
-  "description": "GeoNames gazetteer: place-name search, administrative hierarchy, nearby places and reverse geocoding, postal codes, and country info over 11M+ place names.",
+  "description": "Search GeoNames places, walk admin hierarchies, reverse geocode, get postal codes and country info.",
   "author": {
-    "name": "Casey Hand",
+    "name": "cyanheads",
     "email": "casey@caseyjhand.com",
-    "url": "https://caseyjhand.com"
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/geonames-mcp-server#readme",
   "repository": "https://github.com/cyanheads/geonames-mcp-server",

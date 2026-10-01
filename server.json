@@ -1,7 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/geonames-mcp-server",
-  "description": "GeoNames gazetteer: place search, admin hierarchy, reverse geocoding, postal codes, country info.",
+  "title": "geonames-mcp-server",
+  "description": "Search GeoNames places, walk admin hierarchies, reverse geocode, get postal codes and country info.",
   "repository": {
     "url": "https://github.com/cyanheads/geonames-mcp-server",
     "source": "github"

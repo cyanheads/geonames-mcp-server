@@ -115,10 +115,10 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="geonames-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="Search GeoNames places, walk admin hierarchies, reverse geocode, get postal codes and country info via MCP. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.source=""
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/geonames-mcp-server"
 
 # The manifest comes from the build context: the deps stage's copy was rewritten
 # by the OTel install, and the runtime reads only its name, version, and type.

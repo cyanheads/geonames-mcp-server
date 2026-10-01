@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `framework-skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `framework-skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `framework-skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -59,75 +46,76 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool
 
+Every tool follows this shape: shared inputs from `src/mcp-server/tools/shared-inputs.ts`, the caller's optional `geonamesUsername` (alias `username`), the common error contract declared inline, a service call that resolves the account first, and `found: false` with `guidance` for an unknown id.
+
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  geonameIdInput,
+  geonamesUsernameInput,
+  USERNAME_ALIASES,
+} from '@/mcp-server/tools/shared-inputs.js';
+import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
+import { inlineText } from '@/utils/inline-text.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const getHierarchyTool = tool('geonames_get_hierarchy', {
+  title: 'Get a GeoNames hierarchy',
+  description:
+    'Return the parent chain of a GeoNames feature, ordered from Earth and its continent through the country and admin divisions down to the feature itself, … An unknown id returns found: false. Costs 1 GeoNames credit; cached.',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().int().min(1).max(100).default(10).describe('Max results (1–100)'),
+    geonameId: geonameIdInput,
+    geonamesUsername: geonamesUsernameInput,
   }),
+  inputAliases: USERNAME_ALIASES,
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    found: z.boolean().describe('False when GeoNames has no feature with this geonameId.'),
+    geonameId: z.number().describe('The geonameId that was requested.'),
+    guidance: z.string().optional().describe('What to do next; present only when found is false.'),
+    chain: z.array(/* … */).describe('Administrative ancestors, Earth first and the requested feature last; …'),
   }),
-  auth: ['inventory:read'],
+  errors: [
+    // username_required, caller_account_rejected, server_account_rejected, quota_exhausted,
+    // and upstream_rejected_parameter, each `thrownBy: 'service'` — e.g.:
+    {
+      reason: 'quota_exhausted',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "GeoNames reported the account's hourly, daily, or weekly credit limit spent, or this server's pacer for the account shed the call.",
+      recovery:
+        "Wait for the window named in the message before calling again, or call again with a different GeoNames account: pass geonamesUsername, or omit it to use the server's.",
+      retryable: true,
+      thrownBy: 'service',
+    },
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const service = getGeoNamesService();
+    const chain = await service.hierarchy(
+      input.geonameId,
+      service.resolveAccount(input.geonamesUsername),
+      ctx,
+    );
+    const geonameId = Number(input.geonameId);
+    if (chain === undefined) {
+      return {
+        found: false,
+        geonameId,
+        guidance: `No GeoNames feature has geonameId ${input.geonameId}. Find the place with geonames_search_places and use its geonameId.`,
+        chain: [],
+      };
+    }
+    return { found: true, geonameId, chain: chain.map(toLink) };
   },
 
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  // GeoNames-authored text reaches content[] only through inlineText() / tableCell().
+  format: (result) => [{ type: 'text', text: /* heading, breadcrumb, table */ '' }],
 });
 ```
 
-### Resource
+### Resources and prompts
 
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
-
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
+None. A resource read cannot carry `geonamesUsername`, so on a shared deployment it would always spend the server's account; every datum is reachable through the tools (`docs/design.md`, Design Decision 14).
 
 ### Server config
 
@@ -137,23 +125,30 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  username: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe(
+      'GeoNames account used when a call passes no geonamesUsername. Free accounts must enable free web services.',
+    ),
 });
 
-let _config: z.infer<typeof ServerConfigSchema> | undefined;
-export function getServerConfig() {
-  _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
-  });
+export type ServerConfig = z.infer<typeof ServerConfigSchema>;
+
+let _config: ServerConfig | undefined;
+
+/** Lazily parses the server config from the environment. */
+export function getServerConfig(): ServerConfig {
+  _config ??= parseEnvConfig(ServerConfigSchema, { username: 'GEONAMES_USERNAME' });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`GEONAMES_USERNAME`) not the path (`username`). Throws `ConfigurationError`, which the framework prints as a clean startup banner. An empty value and a whole-value `${…}` placeholder (what an MCPB or plugin host forwards when a user leaves an option blank) read as unset.
+
+`GEONAMES_USERNAME` is a credential: it never reaches `ctx.log`, `ctx.state`, a cache or single-flight key, output, or error text, and examples use a placeholder such as `your_geonames_username`. The same holds for a caller's `geonamesUsername` (`docs/design.md` § Credential model).
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
@@ -163,32 +158,24 @@ For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("
 
 ```ts
 await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
+  name: 'geonames-mcp-server',
+  title: 'geonames-mcp-server', // must match the unscoped package name — enforced by lint:packaging
+  instructions: 'GeoNames gazetteer: 13M+ places worldwide, each keyed by an integer geonameId. …',
+  tools: allToolDefinitions,
+  setup(core) { /* see below */ },
+  teardown() { getGeoNamesService().dispose(); },
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
+`description` is never set here: `package.json` is its canonical source. `instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set. This server's text is mirrored in `docs/design.md` § Server Instructions; keep the two in step.
 
 ### Session posture and shutdown
 
-Two more `createApp()` options shape how the server runs rather than how it presents itself:
+Two more `createApp()` options shape how the server runs rather than how it presents itself: `sessionMode` and the `setup()` / `teardown()` pair.
 
-```ts
-await createApp({
-  sessionMode: 'stateless',          // or { default: 'stateful', require: 'stateful' }
-  setup(core) { startMyWatcher(core.config); },
-  async teardown() { await stopMyWatcher(); },
-});
-```
+`sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). This server declares none — no tool calls `ctx.requestInput` — and `.env.example` and the `Dockerfile` set `MCP_SESSION_MODE=stateless`. Add `{ require: 'stateful' }` if a tool ever asks the caller for input mid-handler: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
 
-`sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Add `require: 'stateful'` when a tool asks the caller for input mid-handler via `ctx.requestInput`: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
-
-`teardown(core)` is the `setup()` counterpart — release a watcher, socket, or non-`unref()`'d timer there. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
+`setup()` registers `USERNAME_LOG_FIELDS` (`shared-inputs.ts`: `geonamesUsername`, `username`, and near-miss keys such as `user` and `account`) with `sanitization.setSensitiveFields`, so failed-call payload logs redact a username under any of them, builds `GeoNamesService` from `getServerConfig()`, and logs a warning when `GEONAMES_USERNAME` is unset. `teardown()` disposes the per-account pacers. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
 
 ---
 
@@ -198,16 +185,11 @@ Handlers receive a unified `ctx` object. Key properties:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | The request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped` — limited to what the client declared (`elicitation` and its form/url modes, `sampling`, `roots`). Client-supplied: a consent gate trusts only a `ctx.state` record it stored when it asked, bound to the operation, caller, and target (see the `api-context` skill). |
-| `ctx.clientCapabilities` | What the client declared for this request, `undefined` when no view exists. Decides whether to ask for optional context (e.g. roots); never a reason to skip a consent prompt. |
-| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
-| `ctx.signal` | `AbortSignal` for cancellation. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible: never log a GeoNames username or a request URL. |
+| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). Tools here write every required field at the top of the handler with a neutral value (`totalCount: 0`, `truncated: false`, `shown: 0`, `cap`), and write the composed `notice` last, since `.truncated()` also writes one and the last write wins. |
+| `ctx.fail` | Throws a declared contract `reason` — `throw ctx.fail('query_required', message)`. Typed against the tool's `errors[]`. |
+| `ctx.signal` | `AbortSignal` for cancellation; the service passes it to its retry ladder and fetch. |
 | `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
-| `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
 
 ---
 
@@ -251,6 +233,8 @@ import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 throw new McpError(JsonRpcErrorCode.InitializationFailed, 'Connection failed', { pool: 'primary' });
 ```
 
+**Service-layer reasons.** `GeoNamesService` throws `username_required`, `caller_account_rejected`, `server_account_rejected`, `quota_exhausted`, and `upstream_rejected_parameter` with `data.reason` (`src/services/geonames/upstream-errors.ts`); every tool declares those five inline with `thrownBy: 'service'`, so copy them from an existing tool when adding one. Availability failures (`upstream_unreachable`, `upstream_timeout`, `upstream_unreadable`, `upstream_http_error`, …) bubble as baseline codes with a service-set `data.reason` and recovery hint, and need no declaration. GeoNames' own message text is never forwarded on auth or quota failures, because it embeds the account name.
+
 See framework CLAUDE.md and the `api-errors` skill for the full auto-classification table, all available factories, and the contract reference.
 
 ---
@@ -259,20 +243,25 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp(): instructions, tools, setup/teardown
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # GEONAMES_USERNAME (Zod schema)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
+    geonames/
+      geonames-service.ts               # GeoNamesService: fetch boundary, retry, pacers, cache, single-flight
+      response-cache.ts                 # Process-local LRU (bytes + entries), keyed without the account
+      response-parsers.ts               # Per-endpoint row parsing and placeholder dropping
+      upstream-errors.ts                # GeoNames status → typed errors
+      feature-codes.ts                  # Bundled feature classes and codes
       types.ts                          # Domain types
   mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+    tools/
+      shared-inputs.ts                  # Shared input schemas, list/blank preprocessing, paging
+      definitions/
+        index.ts                        # allToolDefinitions barrel
+        [tool-name].tool.ts             # The eight geonames_* tools
+  utils/
+    inline-text.ts                      # Sanitizer for GeoNames-authored text in format()
 ```
 
 ---
@@ -281,10 +270,10 @@ src/
 
 | What | Convention | Example |
 |:-----|:-----------|:--------|
-| Files | kebab-case with suffix | `search-docs.tool.ts` |
-| Tool/resource/prompt names | snake_case | `search_docs` |
-| Directories | kebab-case | `src/services/doc-search/` |
-| Descriptions | Single string or template literal, no `+` concatenation | `'Search items by query and filter.'` |
+| Files | kebab-case with suffix | `get-hierarchy.tool.ts` |
+| Tool/resource/prompt names | snake_case, `geonames_` prefix | `geonames_get_hierarchy` |
+| Directories | kebab-case | `src/services/geonames/` |
+| Descriptions | Single string or template literal, no `+` concatenation | `'Return the parent chain of a GeoNames feature, …'` |
 
 ---
 
@@ -359,6 +348,9 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
+| `bun run test:coverage` | Run tests with coverage |
+| `bun run release:github` | Create the GitHub Release from an annotated tag and attach the `.mcpb` bundle |
+| `bun run publish-mcp` | Log in and publish `server.json` to the MCP Registry (token read from the macOS Keychain) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
@@ -371,7 +363,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 `npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
-**Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
+**Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`. A user-supplied variable also goes into the plugin manifests — `.claude-plugin/plugin.json` `userConfig` + `env`, `.codex-plugin/mcp.json` `env_vars` (see Checklist).
 
 **README install badges** (Claude Desktop `.mcpb`, Cursor, VS Code) and the `base64` / `encodeURIComponent` config-generation commands are ship-time concerns — run the `polish-docs-meta` skill, which carries the badge format, layout, and generation snippets in `framework-skills/polish-docs-meta/references/readme.md`.
 
@@ -418,7 +410,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 // Server's own code — via path alias
-import { getMyService } from '@/services/my-domain/my-service.js';
+import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 ```
 
 ---
@@ -431,9 +423,13 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] `ctx.log` for logging, `ctx.state` for storage
 - [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
-- [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
-- [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
-- [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
+- [ ] GeoNames wrapping: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
+- [ ] GeoNames wrapping: normalization and `format()` preserve uncertainty; placeholders (`population: 0`, `geonameId: 0`, empty strings, `adminCode1: "00"`) are dropped, never passed on as facts
+- [ ] GeoNames wrapping: tests include at least one sparse payload case with omitted upstream fields
+- [ ] New upstream parameters added to that endpoint's allowlist in `GeoNamesService` — GeoNames silently ignores a parameter it does not know
+- [ ] Every tool takes `geonamesUsername` (with `inputAliases: USERNAME_ALIASES`) and declares the five common error entries inline with `thrownBy: 'service'`
+- [ ] No GeoNames username in `ctx.log`, `ctx.state`, cache keys, output, enrichment, or error text
+- [ ] GeoNames-authored text rendered through `inlineText()` / `tableCell()` in `format()`; credit costs in tool descriptions match `docs/design.md`
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description

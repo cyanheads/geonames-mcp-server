@@ -1,13 +1,30 @@
 {
   "manifest_version": "0.3",
   "name": "geonames-mcp-server",
+  "display_name": "geonames-mcp-server",
   "version": "0.1.0",
-  "description": "GeoNames gazetteer: place-name search, administrative hierarchy, nearby places and reverse geocoding, postal codes, and country info over 11M+ place names.",
-  "author": {
-    "name": "cyanheads",
-    "email": "casey@caseyjhand.com",
-    "url": "https://caseyjhand.com"
+  "description": "Search GeoNames places, walk admin hierarchies, reverse geocode, get postal codes and country info.",
+  "author": { "name": "cyanheads" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyanheads/geonames-mcp-server"
   },
+  "homepage": "https://github.com/cyanheads/geonames-mcp-server#readme",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "geonames",
+    "gazetteer",
+    "geography",
+    "geocoding",
+    "reverse-geocoding",
+    "postal-code",
+    "administrative-divisions",
+    "toponym"
+  ],
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -23,9 +40,7 @@
     }
   },
   "compatibility": {
-    "runtimes": {
-      "node": ">=24.0.0"
-    }
+    "runtimes": { "node": ">=24.0.0" }
   },
   "tools_generated": true,
   "prompts_generated": true,
@@ -38,10 +53,5 @@
       "required": false,
       "default": ""
     }
-  },
-  "license": "Apache-2.0",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/cyanheads/geonames-mcp-server"
   }
 }
