@@ -118,7 +118,9 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
             isoCode: z
               .string()
               .optional()
-              .describe('ISO 3166-2 code of the division, where one exists.'),
+              .describe(
+                'ISO 3166-2 code of the division, subdivision part only (IDF, not FR-IDF), where one exists.',
+              ),
           })
           .describe('One admin division containing the point.'),
       )

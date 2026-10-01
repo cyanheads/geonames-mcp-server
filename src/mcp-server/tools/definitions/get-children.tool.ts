@@ -12,6 +12,7 @@ import {
   geonameIdInput,
   geonamesUsernameInput,
   limitInput,
+  lowerCased,
   nameContainsInput,
   nameMatcher,
   offsetInput,
@@ -46,13 +47,13 @@ export const getChildrenTool = tool('geonames_get_children', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     geonameId: geonameIdInput.describe(
-      'GeoNames id of the parent feature, a positive integer such as 6252001 (United States), as returned in geonameId by the other geonames tools. A geonames.org/<id> URL is reduced to its id.',
+      'GeoNames id of the parent feature, a positive integer up to 2147483647 such as 6252001 (United States), as returned in geonameId by the other geonames tools. A geonames.org/<id> URL is reduced to its id.',
     ),
-    hierarchy: blankAsUnset(z.enum(HIERARCHIES).default('administrative')).describe(
-      'Which tree to descend: administrative (the default: countries, admin divisions, populated places), tourism (tourist regions and islands), geography (physical regions), or dependency (dependent territories).',
+    hierarchy: blankAsUnset(lowerCased(z.enum(HIERARCHIES).default('administrative'))).describe(
+      'Which tree to descend: administrative (the default: countries, admin divisions, populated places), tourism (tourist regions and islands), geography (physical regions), or dependency (dependent territories). Case-insensitive.',
     ),
     nameContains: nameContainsInput.describe(
-      'Keep only children whose name or toponym name contains every word of this text, ignoring case, accents, and punctuation.',
+      'Keep only children whose name or toponym name contains every word of this text as a substring (kansas also matches Arkansas), ignoring case, accents, and punctuation.',
     ),
     limit: limitInput(500, 100),
     offset: offsetInput(),
@@ -101,7 +102,9 @@ export const getChildrenTool = tool('geonames_get_children', {
             iso3166_2: z
               .string()
               .optional()
-              .describe('ISO 3166-2 code of the first-order admin division.'),
+              .describe(
+                'ISO 3166-2 code of the first-order admin division, subdivision part only: MO, not US-MO.',
+              ),
             lat: z
               .number()
               .optional()
@@ -182,7 +185,8 @@ export const getChildrenTool = tool('geonames_get_children', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: input.limit });
+    ctx.enrich.total(0);
+    ctx.enrich({ truncated: false, shown: 0, cap: input.limit });
     const { hierarchy } = input;
     const parentGeonameId = Number(input.geonameId);
     const service = getGeoNamesService();

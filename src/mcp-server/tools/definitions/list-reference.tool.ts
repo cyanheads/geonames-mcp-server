@@ -11,6 +11,7 @@ import {
   blankAsUnset,
   geonamesUsernameInput,
   limitInput,
+  lowerCased,
   nameContainsInput,
   nameMatcher,
   offsetInput,
@@ -74,11 +75,9 @@ export const listReferenceTool = tool('geonames_list_reference', {
     "Decode GeoNames vocabulary used by the other tools: topic feature_classes lists the 9 one-letter classes; topic feature_codes lists the 684 feature codes with names and definitions, filterable by class and text; topic postal_countries lists the 122 countries with postal-code data and each one's code range and count. feature_classes and feature_codes are bundled and spend no credits; postal_countries costs 1 GeoNames credit a day (cached).",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    topic: z
-      .enum(TOPICS)
-      .describe(
-        'Vocabulary to list: feature_classes (the 9 one-letter classes), feature_codes (the 684 codes), or postal_countries (countries with postal-code data).',
-      ),
+    topic: lowerCased(z.enum(TOPICS)).describe(
+      'Vocabulary to list: feature_classes (the 9 one-letter classes), feature_codes (the 684 codes), or postal_countries (countries with postal-code data). Case-insensitive.',
+    ),
     featureClass: blankAsUnset(
       z.preprocess(
         (value: unknown) => (typeof value === 'string' ? value.toUpperCase() : value),
@@ -88,7 +87,7 @@ export const listReferenceTool = tool('geonames_list_reference', {
       'Topic feature_codes only: keep the codes of this one-letter class (A, H, L, P, R, S, T, U, V). Case-insensitive.',
     ),
     nameContains: nameContainsInput.describe(
-      'Keep only entries whose code, name, or description contains every word of this text, ignoring case, accents, and punctuation.',
+      'Keep only entries whose code, name, or description contains every word of this text as a substring (port also matches airport), ignoring case, accents, and punctuation.',
     ),
     limit: limitInput(700, 100),
     offset: offsetInput(),

@@ -127,11 +127,25 @@ describe('input normalization', () => {
     expect(error.data?.reason).toBe('invalid_arguments');
   });
 
-  it.each(['', 'zip', 'Code', 'postal_code'])('rejects mode %j', async (mode) => {
+  it.each(['', 'zip', 'postal_code'])('rejects mode %j', async (mode) => {
     const fetchFake = serve();
     const error = errorOf(await run({ mode, postalCode: '98101' }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Code', { postalCode: '98101' }, 'code', 'postalCodeSearchJSON'],
+    ['PLACE_NAME', { placeName: 'Seattle' }, 'place_name', 'postalCodeSearchJSON'],
+    ['Nearby', { lat: 47.6, lng: -122.33 }, 'nearby', 'findNearbyPostalCodesJSON'],
+  ])('reads mode %j in any case', async (mode, fields, expected, endpoint) => {
+    const fetchFake = serve();
+    expect(page(await run({ mode, ...fields })).mode).toBe(expected);
+    expect(endpoints(fetchFake)).toEqual([endpoint]);
+  });
+
+  it('says mode is case-insensitive', () => {
+    expect(findPostalCodesTool.input.shape.mode.description).toContain('Case-insensitive.');
   });
 
   it.each([

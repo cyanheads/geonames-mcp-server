@@ -16,6 +16,7 @@ import {
   geonamesUsernameInput,
   isBlank,
   limitInput,
+  lowerCased,
   offsetInput,
   USERNAME_ALIASES,
 } from '@/mcp-server/tools/shared-inputs.js';
@@ -57,8 +58,8 @@ export const searchPlacesTool = tool('geonames_search_places', {
     query: blankAsUnset(z.string().max(200).optional()).describe(
       'Place name to search for, such as Springfield or "Berlin, Germany", up to 200 characters. match sets how it is compared. Omit it to search by filters alone, which then needs at least one of countries, featureClasses, featureCodes, or boundingBox (cities alone is not enough).',
     ),
-    match: blankAsUnset(z.enum(MATCHES).optional()).describe(
-      'How query is matched. name_required (the default) needs at least one query term in the place name while other terms may match the country or admin names; any_field lets every term match any of those fields; exact_name matches the whole name exactly, alternate and historical names included; name_prefix matches names that start with query. Needs query.',
+    match: blankAsUnset(lowerCased(z.enum(MATCHES).optional())).describe(
+      'How query is matched. name_required (the default) needs at least one query term in the place name while other terms may match the country or admin names; any_field lets every term match any of those fields; exact_name matches the whole name exactly, alternate and historical names included; name_prefix matches names that start with query. Needs query. Case-insensitive.',
     ),
     countries: countriesInput,
     featureClasses: featureClassesInput,
@@ -89,8 +90,8 @@ export const searchPlacesTool = tool('geonames_search_places', {
     ).describe(
       'Keep only places inside this box. The box cannot cross the 180° meridian: split such an area into two searches.',
     ),
-    orderBy: blankAsUnset(z.enum(['relevance', 'population']).optional()).describe(
-      "Result order: relevance (GeoNames' default) or population, largest first.",
+    orderBy: blankAsUnset(lowerCased(z.enum(['relevance', 'population']).optional())).describe(
+      "Result order: relevance (GeoNames' default) or population, largest first. Case-insensitive.",
     ),
     limit: limitInput(100, 10),
     offset: offsetInput(MAX_OFFSET),
@@ -145,7 +146,9 @@ export const searchPlacesTool = tool('geonames_search_places', {
             iso3166_2: z
               .string()
               .optional()
-              .describe('ISO 3166-2 code of the first-order admin division.'),
+              .describe(
+                'ISO 3166-2 code of the first-order admin division, subdivision part only: MO, not US-MO.',
+              ),
             population: z
               .number()
               .optional()
@@ -158,7 +161,7 @@ export const searchPlacesTool = tool('geonames_search_places', {
       .number()
       .optional()
       .describe(
-        'Offset of the next page; absent on the last page and past the 5,000-row paging limit.',
+        "Offset of the next page; absent on the last page and once offset is 5000. Capped at 5000, the last offset GeoNames' free service accepts, so that page can repeat rows of this one.",
       ),
   }),
   enrichment: {
@@ -321,17 +324,23 @@ export const searchPlacesTool = tool('geonames_search_places', {
 
     const shown = places.length;
     const next = input.offset + shown;
-    const nextOffset = shown > 0 && next < totalCount && next <= MAX_OFFSET ? next : undefined;
+    const more = shown > 0 && next < totalCount;
+    /** Past the cap, offset 5000 is still a page: it repeats this page's tail, then reaches row `next`. */
+    const nextOffset = more && input.offset < MAX_OFFSET ? Math.min(next, MAX_OFFSET) : undefined;
     ctx.enrich.total(totalCount);
     ctx.enrich({ shown });
-    if (shown > 0 && next < totalCount) {
+    if (more) {
+      const remaining = `${(totalCount - next).toLocaleString('en-US')} more ${totalCount - next === 1 ? 'place' : 'places'}`;
+      const repeated = next - MAX_OFFSET;
       ctx.enrich.truncated({
         shown,
         cap: input.limit,
         guidance:
           nextOffset === undefined
-            ? "GeoNames' free service pages only the first 5,000 rows of a search; narrow with countries, featureCodes, or boundingBox to reach the rest."
-            : `${(totalCount - next).toLocaleString('en-US')} more ${totalCount - next === 1 ? 'place' : 'places'}; call again with offset ${next}.`,
+            ? "GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries, featureCodes, or boundingBox to reach the rest."
+            : nextOffset < next
+              ? `${remaining}; call again with offset ${MAX_OFFSET}, the last offset GeoNames' free service accepts (its first ${repeated} ${repeated === 1 ? 'row repeats' : 'rows repeat'} this page).`
+              : `${remaining}; call again with offset ${next}.`,
       });
     }
     if (shown === 0) {

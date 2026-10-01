@@ -15,6 +15,7 @@ import {
   latInput,
   limitInput,
   lngInput,
+  lowerCased,
   USERNAME_ALIASES,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { type GeoNamesAccount, getGeoNamesService } from '@/services/geonames/geonames-service.js';
@@ -73,11 +74,9 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
     'Look up postal codes in the GeoNames postal database (122 countries): mode code resolves a postal code to its place, admin names, and centroid; mode place_name finds postal codes for a place name; mode nearby lists postal codes within radiusKm (up to 30 km) of a coordinate, nearest first. Ireland returns only Eircode routing keys and Malta only the letter prefix; the United Kingdom (GB), Canada, and the Netherlands hold both full codes and their outward or district prefixes. Check coverage with geonames_list_reference topic postal_countries. Costs 1 GeoNames credit (2 for nearby); cached.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    mode: z
-      .enum(MODES)
-      .describe(
-        'What to look up. code: the place for postalCode (required). place_name: the postal codes of placeName (required). nearby: postal codes around lat and lng (both required; countries not accepted).',
-      ),
+    mode: lowerCased(z.enum(MODES)).describe(
+      'What to look up. code: the place for postalCode (required). place_name: the postal codes of placeName (required). nearby: postal codes around lat and lng (both required; countries not accepted). Case-insensitive.',
+    ),
     postalCode: blankAsUnset(
       z.preprocess(
         (value: unknown) =>
@@ -134,7 +133,7 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
               .string()
               .optional()
               .describe(
-                'ISO 3166-2 code of the first-order admin division. Not sent in mode nearby.',
+                'ISO 3166-2 code of the first-order admin division, subdivision part only: MO, not US-MO. Not sent in mode nearby.',
               ),
             lat: z
               .number()

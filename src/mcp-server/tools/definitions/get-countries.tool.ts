@@ -58,7 +58,7 @@ export const getCountriesTool = tool('geonames_get_countries', {
       'Keep only countries on this continent: AF Africa, AN Antarctica, AS Asia, EU Europe, NA North America, OC Oceania, SA South America. Case-insensitive.',
     ),
     nameContains: nameContainsInput.describe(
-      'Keep only countries whose English name contains every word of this text, ignoring case, accents, and punctuation.',
+      'Keep only countries whose English name contains every word of this text as a substring (niger also matches Nigeria), ignoring case, accents, and punctuation.',
     ),
     limit: limitInput(250, 50),
     offset: offsetInput(),
@@ -259,7 +259,7 @@ export const getCountriesTool = tool('geonames_get_countries', {
           number(country.areaInSqKm),
           country.languages.length > 0 ? tableCell(country.languages.join(', ')) : 'Not available',
           tableCell(country.currencyCode ?? 'Not available'),
-          tableCell(country.postalCodeFormat ?? 'None'),
+          tableCell(country.postalCodeFormat ?? 'Not available'),
           `${north} / ${south} / ${east} / ${west}`,
         ];
         lines.push(`| ${cells.join(' | ')} |`);

@@ -106,7 +106,9 @@ export const getPlaceTool = tool('geonames_get_place', {
         iso3166_2: z
           .string()
           .optional()
-          .describe('ISO 3166-2 code of the first-order admin division.'),
+          .describe(
+            'ISO 3166-2 code of the first-order admin division, subdivision part only: MO, not US-MO.',
+          ),
         adminLevels: z
           .array(
             z
@@ -137,14 +139,8 @@ export const getPlaceTool = tool('geonames_get_place', {
         timezone: z
           .object({
             timezoneId: z.string().optional().describe('IANA timezone id, such as Europe/Paris.'),
-            gmtOffsetInHours: z
-              .number()
-              .optional()
-              .describe('Standard-time offset from GMT in hours, as of January 1.'),
-            dstOffsetInHours: z
-              .number()
-              .optional()
-              .describe('Daylight-saving offset from GMT in hours, as of July 1.'),
+            gmtOffsetInHours: z.number().optional().describe('UTC offset in hours on 1 January.'),
+            dstOffsetInHours: z.number().optional().describe('UTC offset in hours on 1 July.'),
           })
           .optional()
           .describe('Timezone of the place. Absent when GeoNames sends none.'),
@@ -302,7 +298,15 @@ export const getPlaceTool = tool('geonames_get_place', {
       ]
         .filter(Boolean)
         .join(' ');
+      const elevation = [
+        place.elevationInMeters !== undefined && `${place.elevationInMeters} m recorded`,
+        place.demElevationInMeters !== undefined && `${place.demElevationInMeters} m DEM (SRTM3)`,
+      ].filter(Boolean);
       const tz = place.timezone;
+      const offsets = [
+        tz?.gmtOffsetInHours !== undefined && `${tz.gmtOffsetInHours} h on 1 January`,
+        tz?.dstOffsetInHours !== undefined && `${tz.dstOffsetInHours} h on 1 July`,
+      ].filter(Boolean);
       const box = place.boundingBox;
       lines.push(
         '',
@@ -314,12 +318,8 @@ export const getPlaceTool = tool('geonames_get_place', {
         `- **Country:** ${country || 'Not available'}`,
         `- **ISO 3166-2 (first level):** ${orNotAvailable(place.iso3166_2)}`,
         `- **Population:** ${place.population === undefined ? 'Not available' : place.population.toLocaleString('en-US')}`,
-        `- **Elevation:** ${place.elevationInMeters === undefined ? 'Not available' : `${place.elevationInMeters} m`} recorded · ${place.demElevationInMeters === undefined ? 'Not available' : `${place.demElevationInMeters} m`} DEM (SRTM3)`,
-        `- **Timezone:** ${
-          tz === undefined
-            ? 'Not available'
-            : `${orNotAvailable(tz.timezoneId)} (GMT offset ${tz.gmtOffsetInHours ?? 'not available'} h, DST offset ${tz.dstOffsetInHours ?? 'not available'} h)`
-        }`,
+        `- **Elevation:** ${elevation.join(' · ') || 'Not available'}`,
+        `- **Timezone:** ${orNotAvailable(tz?.timezoneId)}${offsets.length > 0 ? ` (UTC offset ${offsets.join(', ')})` : ''}`,
         `- **Bounding box:** ${box === undefined ? 'Not available' : `north ${box.north}, south ${box.south}, east ${box.east}, west ${box.west}`}`,
         `- **Wikipedia:** ${place.wikipediaUrl === undefined ? 'Not available' : plainUrl(place.wikipediaUrl)}`,
       );

@@ -159,6 +159,7 @@ describe('geonameIdInput', () => {
     ['  5809844  ', '5809844'],
     ['1', '1'],
     ['1234567890', '1234567890'],
+    ['2147483647', '2147483647'],
     ['https://www.geonames.org/5809844/seattle.html', '5809844'],
     ['http://geonames.org/5809844', '5809844'],
     ['https://sws.geonames.org/5809844/', '5809844'],
@@ -187,8 +188,32 @@ describe('geonameIdInput', () => {
     rejects(geonameIdInput, input);
   });
 
-  it('rejects a JSON integer (the framework repairs it to a string before the schema runs)', () => {
-    rejects(geonameIdInput, 5809844);
+  it('reads a JSON integer as its digit string', () => {
+    expect(ok(geonameIdInput, 5809844)).toBe('5809844');
+    expect(ok(geonameIdInput, 2147483647)).toBe('2147483647');
+  });
+
+  it.each([0, -5, 5.5])('rejects the JSON number %j', (input) => {
+    rejects(geonameIdInput, input);
+  });
+
+  it.each([
+    '2147483648',
+    '9999999999',
+    '12345678901',
+    'https://www.geonames.org/2147483648',
+    2147483648,
+  ])(
+    'rejects %j, past the 32-bit ids GeoNames parses, with one issue naming the limit',
+    (input) => {
+      const { error } = parse(geonameIdInput, input);
+      expect(error?.issues).toHaveLength(1);
+      expect(error?.issues[0]?.message).toContain('at most 2147483647');
+    },
+  );
+
+  it('rejects a non-numeric id with one issue', () => {
+    expect(parse(geonameIdInput, 'abc').error?.issues).toHaveLength(1);
   });
 });
 
@@ -275,7 +300,14 @@ describe('citiesInput', () => {
     expect(ok(citiesInput, value)).toBeUndefined();
   });
 
-  it.each(['cities500', 'Cities1000', 'all'])('rejects %j', (value) => {
+  it.each([
+    ['Cities1000', 'cities1000'],
+    ['CITIES15000', 'cities15000'],
+  ])('reads %j in any case as %s', (value, tier) => {
+    expect(ok(citiesInput, value)).toBe(tier);
+  });
+
+  it.each(['cities500', 'all'])('rejects %j', (value) => {
     rejects(citiesInput, value);
   });
 });
@@ -309,6 +341,11 @@ describe('nameContainsInput', () => {
   it('trims, and measures the 100-character cap after trimming', () => {
     expect(ok(nameContainsInput, `  ${'a'.repeat(100)}  `)).toHaveLength(100);
     rejects(nameContainsInput, 'a'.repeat(101));
+  });
+
+  it('says each word matches as a substring', () => {
+    expect(nameContainsInput.description).toContain('substring');
+    expect(nameMatcher('kansas')(['Arkansas'])).toBe(true);
   });
 });
 

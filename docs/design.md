@@ -71,24 +71,27 @@ Defined once in `src/mcp-server/tools/shared-inputs.ts` and reused by every tool
 | Field | Schema | Normalization (in the schema, before validation) |
 |:------|:-------|:-------------------------------------------------|
 | `geonamesUsername` | optional string, `^\S{1,64}$` | `z.preprocess`: trim; blank → `undefined`. `inputAliases: { username: 'geonamesUsername' }`. |
-| `geonameId` | string, `^[1-9]\d{0,9}$` | trim; a `geonames.org/<id>` or `sws.geonames.org/<id>/` URL reduces to its digits (one-to-one). A JSON integer is repaired to its digit string by the framework, so the field stays `z.string()`. |
+| `geonameId` | string, `^[1-9]\d*$` (aborting, so a non-numeric id gets one issue), then at most 2147483647 | trim; a `geonames.org/<id>` or `sws.geonames.org/<id>/` URL reduces to its digits (one-to-one). A JSON safe integer becomes its digit string in the same preprocess, so the field stays `z.string()` and an out-of-range integer gets the range message rather than a type error (Design Decision 37). |
 | `countries` (ISO alpha-2 list) | `z.array(z.string().regex(/^[A-Z]{2}$/)).max(10)`, optional | string → split on `,`; each item trimmed and upper-cased; `UK` → `GB` (ISO's exceptionally reserved code for the United Kingdom; GeoNames' search maps it the same way, the local country filters would not); blanks dropped; list cut to 11 items before validation; empty → `undefined`. |
 | `featureClasses` | `z.array(z.enum(['A','H','L','P','R','S','T','U','V'])).max(9)`, optional | same list preprocess, upper-cased, cut to 10. |
 | `featureCodes` | `z.array(z.string().regex(/^[A-Z0-9]{2,5}$/)).max(20)`, optional | same list preprocess, upper-cased, a leading class prefix (`P.PPLC`, GeoNames' composite form) stripped, cut to 21. The handler then checks each code against the bundled table → `unknown_feature_code`. |
-| `cities` | optional `z.enum(['cities1000','cities5000','cities15000'])` | blank → `undefined`. Described as: populated places with population ≥ 1,000 / 5,000 / 15,000, or seats of admin divisions (GeoNames' cities tiers). |
+| `cities` | optional `z.enum(['cities1000','cities5000','cities15000'])` | blank → `undefined`; lower-cased. Described as: populated places with population ≥ 1,000 / 5,000 / 15,000, or seats of admin divisions (GeoNames' cities tiers). |
 | `lat` / `lng` | `z.number().min(-90).max(90)` / `z.number().min(-180).max(180)` | none |
-| `nameContains` | optional string, max 100 | trim; blank → `undefined`. Local strict token match (lower-case, NFKD, diacritics and punctuation stripped, every token present). |
+| `nameContains` | optional string, max 100 | trim; blank → `undefined`. Local strict token match (lower-case, NFKD, diacritics and punctuation stripped, every token present as a substring, so `kansas` also matches Arkansas; the descriptions say so). |
 | `limit` / `offset` | integers with per-tool bounds | none |
 
 Every optional input goes through one `blankAsUnset` preprocess, not only strings: optional enums (`match`, `orderBy`, `cities`, `continent`, `featureClass`, `hierarchy`), optional numbers (`lat`/`lng` in `geonames_find_postal_codes`, `radiusKm`), lists, and the `boundingBox` object. `''` or a whitespace-only string becomes `undefined`, and so does an object whose fields are all absent or blank. The wrapper sits outside any `.default()`, so a blank takes the default. A partly blank `boundingBox` stays invalid: each blank or missing bound fails with a message that names it (through the issue path) and says to give all four bounds or omit `boundingBox`. None uses `.min(1)`. No input takes a date.
+
+Every enum accepts any case. Word enums (`match`, `orderBy`, `cities`, `hierarchy`, `mode`, `topic`) go through the shared `lowerCased()` preprocess; code enums and code lists (`continent`, `featureClass`, `featureClasses`, `featureCodes`, `countries`) are upper-cased. Each of their descriptions says so (Design Decision 39).
 
 ## Tools — detail
 
 Rules that hold for every tool below:
 
-- **Enrichment writes.** Every required enrichment field is written once at the top of the handler with its neutral value (`totalCount: 0`, `truncated: false`, `shown: 0`, `cap: <limit>`), then overwritten as data arrives — including on the `found: false` path. The composed `notice` is written last with `ctx.enrich.notice`, because `ctx.enrich.truncated()` also writes a notice and the last write wins.
+- **Enrichment writes.** Every required enrichment field is written once at the top of the handler with its neutral value (`totalCount: 0`, `truncated: false`, `shown: 0`, `cap: <limit>`), then overwritten as data arrives — including on the `found: false` path. A `found: false` page that returns before any data writes `totalCount` through `ctx.enrich.total(0)`, so its trailer reads `**0 total**` like every other page's. The composed `notice` is written last with `ctx.enrich.notice`, because `ctx.enrich.truncated()` also writes a notice and the last write wins.
 - **Upstream-authored text.** Names, toponym names, ASCII names, alternate names, admin names, country names, capitals, continent names, place names, ocean names, feature-class and feature-code labels and definitions, timezone ids, language lists, postal formats, Wikipedia URLs, link URLs, and the GeoNames status text forwarded in `upstream_rejected_parameter` messages all come from community-edited GeoNames data. `format()` renders them only in inline slots (headings, bold labels, table cells, list items) through one helper: CR/LF/tab → space; C0/C1 control and bidi characters (U+200E/F, U+202A–E, U+2066–9, U+061C) stripped; backslash escaped first, then `[` `]` backslash-escaped; `<` `>` as `&lt;` `&gt;`. Caller values echoed into notices and messages (`query`, `nameContains`, `placeName`) go through the same helper. URLs are printed as plain text, never as markdown links: only `http`/`https` URLs print as URLs (a scheme-less `wikipediaURL` gets `https://` prepended), with `[` and `]` percent-encoded; any other scheme prints as escaped text. `structuredContent` keeps every string as received. No GeoNames field is multi-line prose, so nothing needs a fence.
-- **Absent values.** GeoNames writes absence as placeholders: `population: 0`, empty strings (`adminName1: ""` on Earth, continent, and country rows; `adminName2…5: ""` on `getJSON`), `adminCode1: "00"` on country rows, and `geonameId: 0` on `oceanJSON`. The service drops each placeholder, so the field is omitted from output and `format()` renders "Not available" (dense table cells render "—": the hierarchy table, whose Earth and continent rows carry no country or admin fields, the numeric and FIPS slots of the country codes cell, and the reference Class column).
+- **Absent values.** GeoNames writes absence as placeholders: `population: 0`, empty strings (`adminName1: ""` on Earth, continent, and country rows; `adminName2…5: ""` on `getJSON`), `adminCode1: "00"` on country rows, and `geonameId: 0` on `oceanJSON`. The service drops each placeholder, so the field is omitted from output and `format()` renders "Not available" (dense table cells render "—": the hierarchy table, whose Earth and continent rows carry no country or admin fields, the numeric and FIPS slots of the country codes cell, and the reference Class column). A line that joins several values renders only the ones present, and "Not available" only when none is: `geonames_get_place`'s elevation line never reads `Not available recorded`. A missing country postal format renders "Not available" too, not "None".
+- **ISO 3166-2 codes.** GeoNames sends only the subdivision part (`MO`, `IDF`, `ENG`), never the `US-MO` form. Every `iso3166_2` field and `geonames_reverse_geocode`'s `adminLevels[].isoCode` pass it through as received, and their descriptions say so.
 - **Coordinates.** Upstream sends `lat`/`lng` as strings on gazetteer endpoints and as numbers on postal and timezone endpoints; the service parses both to numbers. A value that fails to parse drops the row's coordinate fields rather than emitting `NaN` (never observed), so `lat`/`lng` are optional in every domain row and every output schema, rendered "Not available" when absent.
 - **Common error contract.** Every tool declares these five entries inline (`thrownBy: 'service'`):
 
@@ -113,13 +116,13 @@ Upstream availability failures (`ServiceUnavailable`, `Timeout`) bubble as basel
 | Param | Type | Maps to | Notes |
 |:------|:-----|:--------|:------|
 | `query` | optional string ≤ 200, trimmed, blank → unset | `q` / `name_equals` / `name_startsWith` per `match` | — |
-| `match` | optional enum `name_required` \| `any_field` \| `exact_name` \| `name_prefix` | `name_required` → `q` + `isNameRequired=true`; `any_field` → `q`; `exact_name` → `name_equals`; `name_prefix` → `name_startsWith` | Applied as `name_required` when `query` is set and `match` is not. `exact_name` also matches alternate and historical names (probe: "Springfield" returned Plattsburg, MO). Set without `query` → `query_required`. |
+| `match` | optional enum `name_required` \| `any_field` \| `exact_name` \| `name_prefix`, any case | `name_required` → `q` + `isNameRequired=true`; `any_field` → `q`; `exact_name` → `name_equals`; `name_prefix` → `name_startsWith` | Applied as `name_required` when `query` is set and `match` is not. `exact_name` also matches alternate and historical names (probe: "Springfield" returned Plattsburg, MO). Set without `query` → `query_required`. |
 | `countries` | ISO alpha-2 list ≤ 10 | `country` repeated | |
 | `featureClasses` | class list ≤ 9 | `featureClass` repeated | |
 | `featureCodes` | code list ≤ 20 | `featureCode` repeated | validated against the bundled table |
 | `cities` | enum | `cities` | applies to populated places |
 | `boundingBox` | optional strict object `{ north, south, east, west }` (numbers in lat/lng range) | `north`/`south`/`east`/`west` | handler rejects `south >= north` or `west >= east` → `invalid_bounding_box` |
-| `orderBy` | optional enum `relevance` \| `population` | `orderby=population`; `relevance` sends nothing (upstream default) | `population` sorts descending (verified with `q`, `name_equals`, `name_startsWith`). |
+| `orderBy` | optional enum `relevance` \| `population`, any case | `orderby=population`; `relevance` sends nothing (upstream default) | `population` sorts descending (verified with `q`, `name_equals`, `name_startsWith`). |
 | `limit` | int 1–100, default 10 | `maxRows` | upstream max 1000; 100 keeps responses ≤ ~45 KB |
 | `offset` | int 0–5000, default 0 | `startRow` | upstream free-tier max 5000 (status 25 beyond) |
 | `geonamesUsername` | shared | `username` | |
@@ -129,7 +132,7 @@ Handler preconditions: `query` absent and none of `countries`, `featureClasses`,
 **Output:**
 
 - `places[]`: `geonameId` (number), `name`, `toponymName`, `lat?`, `lng?`, `featureClass?`, `featureClassName?` (`fclName`, trimmed), `featureCode?`, `featureName?` (`fcodeName`), `countryCode?`, `countryName?`, `adminCode1?`, `adminName1?`, `iso3166_2?` (`adminCodes1.ISO3166_2`), `population?`.
-- `nextOffset?`: `offset + shown` when more results remain and that value is ≤ 5000; omitted otherwise.
+- `nextOffset?`: when more results remain and `offset` is below 5000, `offset + shown` capped at 5000; omitted on the last page and at offset 5000. Offset 5000 still returns rows, so a page whose next row lies past 5000 gets `nextOffset: 5000`, and that page repeats this one's tail (Design Decision 38).
 
 **Enrichment:** `totalCount` (required; upstream `totalResultsCount`), `effectiveQuery` (required echo, e.g. `name_required "Springfield" · countries US · featureClasses P · orderBy population`), `truncated`, `shown`, `cap` (required; `truncated` becomes true when `offset + shown < totalCount`), `notice?`.
 
@@ -144,7 +147,7 @@ Handler preconditions: `query` absent and none of `countries`, `featureClasses`,
 | `boundingBox` set | `Only places inside the bounding box were searched; widen or drop boundingBox.` |
 | `cities` set | `{cities} excludes smaller populated places; drop cities to include them.` |
 
-A non-empty page with more results remaining writes `truncated` and a notice: `{n} more places; call again with offset {nextOffset}.`, or, when `offset + shown > 5000` leaves no reachable next page, the paging-cap notice `GeoNames' free service pages only the first 5,000 rows of a search; narrow with countries, featureCodes, or boundingBox to reach the rest.`
+A non-empty page with more results remaining writes `truncated` and a notice: `{n} more places; call again with offset {nextOffset}.`. When the next row lies past 5000, the notice names the clamp and the overlap: `{n} more places; call again with offset 5000, the last offset GeoNames' free service accepts (its first {k} rows repeat this page).`. At offset 5000, where no later page is reachable, it is the paging-cap notice `GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries, featureCodes, or boundingBox to reach the rest.`
 
 **Tool-specific errors:**
 
@@ -174,7 +177,7 @@ A non-empty page with more results remaining writes `truncated` and a notice: `{
 - `countryCode?`, `countryName?`, `countryGeonameId?` (`countryId` parsed to a number), `continentCode?`, `iso3166_2?`
 - `adminLevels[]`: `{ level (1–5), code?, name?, geonameId? }` from `adminCodeN` / `adminNameN` / `adminIdN`; a level appears only when its code or name is non-empty.
 - `population?`, `elevationInMeters?` (`elevation`, often absent), `demElevationInMeters?` (`srtm3`; omitted at the -32768/-9999 no-data sentinels)
-- `timezone?`: `{ timezoneId?, gmtOffsetInHours?, dstOffsetInHours? }`, each field optional (GeoNames omits the IANA id for points no zone covers; see `timezoneJSON`), the object omitted when GeoNames sends none of them
+- `timezone?`: `{ timezoneId?, gmtOffsetInHours?, dstOffsetInHours? }`, each field optional (GeoNames omits the IANA id for points no zone covers; see `timezoneJSON`), the object omitted when GeoNames sends none of them. `gmtOffsetInHours` is the UTC offset on 1 January and `dstOffsetInHours` the offset on 1 July, described and rendered by date (`Australia/Sydney (UTC offset 11 h on 1 January, 10 h on 1 July)`), never as standard and daylight time (Design Decision 36).
 - `boundingBox?`: `{ north, south, east, west }`
 - `wikipediaUrl?` (as received, no scheme)
 - `alternateNames[]`: `{ name, lang?, isPreferredName?, isShortName? }` — every entry whose `lang` is not one of the pseudo-languages below (the two flags are the ones observed; pass any further boolean flag GeoNames adds only after a probe). Name-like pseudo-languages (`abbr` abbreviation, `phon` phonetic, `piny` pinyin, `fr_1793` French Revolution name) stay here under their tag.
@@ -210,7 +213,7 @@ A non-empty page with more results remaining writes `truncated` and a notice: `{
 | Param | Type | Maps to | Notes |
 |:------|:-----|:--------|:------|
 | `geonameId` | shared | `geonameId` | |
-| `hierarchy` | enum `administrative` \| `tourism` \| `geography` \| `dependency`, default `administrative` | `hierarchy` (omitted for `administrative`) | |
+| `hierarchy` | enum `administrative` \| `tourism` \| `geography` \| `dependency`, any case, default `administrative` | `hierarchy` (omitted for `administrative`) | |
 | `nameContains` | shared | local filter | over `name` and `toponymName` of the full fetched list |
 | `limit` | int 1–500, default 100 | local | |
 | `offset` | int ≥ 0, default 0 | local | |
@@ -298,7 +301,7 @@ Flat input with an enum discriminator (a union root is flattened by Claude clien
 
 | Param | Type | Maps to | Notes |
 |:------|:-----|:--------|:------|
-| `mode` | enum `code` \| `place_name` \| `nearby` (required) | endpoint choice | `code`/`place_name` → `postalCodeSearchJSON`; `nearby` → `findNearbyPostalCodesJSON` |
+| `mode` | enum `code` \| `place_name` \| `nearby` (required), any case | endpoint choice | `code`/`place_name` → `postalCodeSearchJSON`; `nearby` → `findNearbyPostalCodesJSON` |
 | `postalCode` | optional string, `^[A-Z0-9][A-Z0-9 -]{0,11}$` | `postalcode` | preprocess: trim, collapse internal whitespace, upper-case; blank → unset. Required in `code`; sent in `place_name` too when given (Design Decision 33). |
 | `placeName` | optional string ≤ 100 | `placename` | trim; blank → unset. Required in `place_name`; sent in `code` too when given. GeoNames matches it against place name, admin names, and country (probe: a city neighborhood's name also matched a same-named county in another state). |
 | `lat`, `lng` | optional shared | `lat`, `lng` | Required in `nearby`. |
@@ -346,7 +349,7 @@ The code-mode fragments that apply are joined; "otherwise" applies only when non
 | `offset` | int ≥ 0, default 0 | local | |
 | `geonamesUsername` | shared | `username` | used only on a cold cache |
 
-**Output:** `countries[]`: `{ countryCode, isoAlpha3, isoNumeric?, fipsCode?, countryName, geonameId, capital?, continentCode, continentName, population?, areaInSqKm?, languages[], currencyCode?, postalCodeFormat?, boundingBox }` in GeoNames' order, `notFound[]` (requested codes that match no country in the table, whatever the other filters; see Design Decision 31), `nextOffset?`. `continent` is upper-cased before validation; `countries` maps `UK` to `GB` like the shared alpha-2 input. Upstream sends `population`, `areaInSqKm`, and `isoNumeric` as strings; empty strings (capital ×9, postalCodeFormat ×73, languages ×3, fipsCode ×3, currencyCode ×1) and `"0"` population (×4, e.g. AQ) are omitted. `languages` splits GeoNames' comma list (`en-US,es-US,haw,fr`).
+**Output:** `countries[]`: `{ countryCode, isoAlpha3, isoNumeric?, fipsCode?, countryName, geonameId, capital?, continentCode, continentName, population?, areaInSqKm?, languages[], currencyCode?, postalCodeFormat?, boundingBox }` in GeoNames' order, `notFound[]` (requested codes that match no country in the table, whatever the other filters; see Design Decision 31), `nextOffset?`. `continent` is upper-cased before validation; `countries` maps `UK` to `GB` like the shared alpha-2 input. Upstream sends `population`, `areaInSqKm`, and `isoNumeric` as strings; empty strings (capital ×9, postalCodeFormat ×73, languages ×3, fipsCode ×3, currencyCode ×1) and `"0"` population (×4, e.g. AQ) are omitted; `format()` renders a missing postal format "Not available", like the other absent values. `languages` splits GeoNames' comma list (`en-US,es-US,haw,fr`).
 
 **Enrichment:** `totalCount`, `truncated`, `shown`, `cap` (required), `notice?` (`No country matched; call geonames_get_countries with no filters to list all 250.`; `offset {offset} is past the last country ({total}); call again with a smaller offset.`; on a truncated page, `{n} more countries; call again with offset {nextOffset}.`).
 
@@ -358,7 +361,7 @@ The code-mode fragments that apply are joined; "otherwise" applies only when non
 
 | Param | Type | Notes |
 |:------|:-----|:------|
-| `topic` | enum `feature_classes` \| `feature_codes` \| `postal_countries` (required) | |
+| `topic` | enum `feature_classes` \| `feature_codes` \| `postal_countries` (required), any case | |
 | `featureClass` | optional enum `A`…`V` (blank → unset, upper-cased) | `feature_codes` only; else `filter_not_applicable` |
 | `nameContains` | shared | local filter over code, name, and description |
 | `limit` | int 1–700, default 100 | local |
@@ -503,11 +506,15 @@ Each step is independently testable; `bun run devcheck` after each.
 33. **In modes code and place_name, `postalCode` and `placeName` both reach `postalCodeSearchJSON` when given.** GeoNames accepts the two together and matches both, so a second field narrows the lookup instead of being silently dropped. Fields of the other modes (`lat`, `lng`, `radiusKm` outside nearby; `postalCode`, `placeName` in nearby) have no counterpart on that endpoint and are not sent.
 34. **A lookup made only for a notice never fails the call.** `geonames_find_postal_codes` reads the postal coverage list only to word a zero-hit notice. When that lookup fails (quota, availability, a caller username GeoNames rejects while the search itself was cached), the coverage fragment is dropped, the other fragments or the generic one apply, and the failure is logged at `debug` through the process logger with its reason, code, and account side: `ctx.log` reaches the client, and no record carries the account name. A cancelled call still cancels. It is the only such lookup: every other upstream call feeds output, not a notice.
 35. **The ladder's total deadline surfaces as `upstream_timeout`.** `withRetry` reports an expired deadline as `Timeout` with `reason: 'retry_deadline_exceeded'` and no recovery hint, on any tool whose upstream stays slow for 20 s and on the reverse-geocode ocean follow-up's shorter budget. To a caller it means the same as the attempt timer, GeoNames answering too slowly, so the service restates it with that reason and hint, keeping `deadlineMs` and `retryAttempts` in `data` and the original as the cause.
+36. **Timezone offsets are labelled by date.** GeoNames' `gmtOffset` and `dstOffset` are the UTC offsets on 1 January and 1 July, not standard and daylight time. South of the equator 1 January falls in DST, so a standard/DST label swaps the two for every southern place that observes it (Sydney: 11 on 1 January, 10 on 1 July). Both tools that return them describe and render them by date.
+37. **The schema caps `geonameId` at 2147483647.** GeoNames parses the id as a 32-bit integer and answers anything larger with status 14 (`For input string: "…"`), which surfaced as `upstream_rejected_parameter` with a recovery hint about feature classes and postal coverage, after a spent request. The cap rejects such an id before any request, with a message that names the limit. The preprocess also turns a JSON integer into its digit string, because the framework's integer repair would otherwise restate the original type error instead of the range message.
+38. **Search offers offset 5000 even when it overlaps.** GeoNames accepts `startRow` up to 5000 and returns rows there, so a page that ends past row 5000 (offset 4995, limit 10) can still reach later rows through offset 5000. Omitting `nextOffset` there would hide reachable rows; offering the unclamped value would send a caller into status 25. The clamp keeps `nextOffset` present exactly when another page can return rows, and the notice says how many rows of that page repeat.
+39. **Every enum accepts any case.** A caller that sends `Exact_Name`, `CODE`, or `Tourism` means the canonical value, and the mapping is exact, so word enums are lower-cased in the schema (the shared `lowerCased()` helper) as code enums are upper-cased. Rejecting the variant would cost a round trip for no ambiguity. The descriptions say `Case-insensitive.` so a caller need not guess.
 
 ## Known Limitations
 
 - **Shared quota on hosted deployments.** All callers without their own username share 1,000 credits/hour. A burst of reverse geocodes (up to 7 credits each) can exhaust it, and GeoNames does not say when the hourly window resets.
-- **Search reaches only the first 5,000 rows** of any result set on the free tier (`startRow` max 5000), and `limit` is capped at 100 per call.
+- **Search pages no further than offset 5000** on the free tier (`startRow` max 5000), and `limit` is capped at 100 per call, so a result set is reachable up to its 5,100th row (offset 5000, limit 100).
 - **Children are capped at 1,000 per parent fetch.** Whether GeoNames returns more for larger parents was not probed; the notice discloses when `totalResultsCount` exceeds the rows returned.
 - **Postal data covers 122 countries.** Ireland and Malta return only code prefixes. US nearby lookups place the first row at the query point rather than the ZIP centroid. GeoNames reports no total for postal searches, so truncation is inferred from a full page.
 - **Coastal points can resolve to the ocean.** The subdivision lookup uses no coastal buffer, so a point just offshore returns the sea while its nearby places are on land.

@@ -96,6 +96,23 @@ describe('geonameId input', () => {
     },
   );
 
+  it.each(['2147483648', 2147483648])(
+    'rejects geonameId %j, past 2147483647, with a message naming the limit and no request',
+    async (geonameId) => {
+      const fetchFake = serve();
+      const error = errorOf(await run({ geonameId }));
+      expect(error.data?.reason).toBe('invalid_arguments');
+      expect(error.message).toContain('geonameId: Must be at most 2147483647');
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('sends 2147483647, the largest id the schema accepts', async () => {
+    const fetchFake = serve(HIERARCHY_EARTH_ONLY_BODY);
+    expect(successOf<Result>(await run({ geonameId: '2147483647' })).found).toBe(false);
+    expect(paramsOf(requestedUrls(fetchFake)[0] as URL)).toEqual([['geonameId', '2147483647']]);
+  });
+
   it('requires geonameId', async () => {
     expect(errorOf(await run({})).code).toBe(JsonRpcErrorCode.InvalidParams);
   });

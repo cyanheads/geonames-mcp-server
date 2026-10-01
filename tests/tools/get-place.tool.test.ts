@@ -102,7 +102,7 @@ describe('geonameId input', () => {
     ['geonames.org/5809844?lang=en', '5809844'],
     ['HTTPS://GEONAMES.ORG/5809844#top', '5809844'],
     ['1', '1'],
-    ['9999999999', '9999999999'],
+    ['2147483647', '2147483647'],
   ])('sends %j as geonameId %s', async (geonameId, expected) => {
     const fetchFake = serve();
     successOf<Result>(await run({ geonameId }));
@@ -124,6 +124,8 @@ describe('geonameId input', () => {
     '12.5',
     'abc',
     '5809844abc',
+    '2147483648',
+    '9999999999',
     '12345678901',
     'https://evil.test/5809844',
     'https://geonames.org.evil.test/5809844',
@@ -134,6 +136,16 @@ describe('geonameId input', () => {
     const error = errorOf(await run({ geonameId }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['geonameId'] })]);
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it('rejects an id past 2147483647 with a message naming the limit, never the upstream hint', async () => {
+    const fetchFake = serve();
+    const result = await run({ geonameId: '2147483648' });
+    const error = errorOf(result);
+    expect(error.data?.reason).toBe('invalid_arguments');
+    expect(error.message).toContain('geonameId: Must be at most 2147483647');
+    expect(allText(result)).not.toContain('feature classes');
     expect(fetchFake).not.toHaveBeenCalled();
   });
 
@@ -376,13 +388,42 @@ describe('the record', () => {
     expect(textOf(result)).toContain('**Elevation:** 0 m recorded · 0 m DEM (SRTM3)');
   });
 
+  it('renders only the elevation it has', async () => {
+    serve({ ...GET_SEATTLE_BODY, elevation: undefined });
+    expect(textOf(await run({ geonameId: '5809844' }))).toContain(
+      '- **Elevation:** 54 m DEM (SRTM3)\n',
+    );
+  });
+
+  it('labels the timezone offsets by date, so a southern place does not read as DST in winter', async () => {
+    serve({
+      ...GET_SEATTLE_BODY,
+      geonameId: 2147714,
+      timezone: { timeZoneId: 'Australia/Sydney', gmtOffset: 11, dstOffset: 10 },
+    });
+    const result = await run({ geonameId: '2147714' });
+    expect(placeOf(result).timezone).toEqual({
+      timezoneId: 'Australia/Sydney',
+      gmtOffsetInHours: 11,
+      dstOffsetInHours: 10,
+    });
+    expect(textOf(result)).toContain(
+      '- **Timezone:** Australia/Sydney (UTC offset 11 h on 1 January, 10 h on 1 July)\n',
+    );
+    expect(textOf(result)).not.toMatch(/GMT offset|DST offset/);
+  });
+
+  it('describes the timezone offsets by date, not as standard and daylight time', () => {
+    const timezone = getPlaceTool.output.shape.place.unwrap().shape.timezone.unwrap().shape;
+    expect(timezone.gmtOffsetInHours.description).toBe('UTC offset in hours on 1 January.');
+    expect(timezone.dstOffsetInHours.description).toBe('UTC offset in hours on 1 July.');
+  });
+
   it('keeps a partial timezone, and omits one with no usable field', async () => {
     serve({ ...GET_SEATTLE_BODY, timezone: { gmtOffset: 1 } });
     const result = await run({ geonameId: '5809844' });
     expect(placeOf(result).timezone).toEqual({ gmtOffsetInHours: 1 });
-    expect(textOf(result)).toContain(
-      '**Timezone:** Not available (GMT offset 1 h, DST offset not available h)',
-    );
+    expect(textOf(result)).toContain('**Timezone:** Not available (UTC offset 1 h on 1 January)\n');
     serve({ ...GET_SEATTLE_BODY, geonameId: 5809845, timezone: {} });
     const bare = await run({ geonameId: '5809845' });
     expect(placeOf(bare)).not.toHaveProperty('timezone');
@@ -469,7 +510,7 @@ describe('format()', () => {
     expect(rendered).toContain('- **Population:** 737,015');
     expect(rendered).toContain('- **Elevation:** 125 m recorded · 54 m DEM (SRTM3)');
     expect(rendered).toContain(
-      '- **Timezone:** America/Los_Angeles (GMT offset -8 h, DST offset -7 h)',
+      '- **Timezone:** America/Los_Angeles (UTC offset -8 h on 1 January, -7 h on 1 July)',
     );
     expect(rendered).toContain(
       '- **Bounding box:** north 47.73, south 47.49, east -122.22, west -122.44',
@@ -497,9 +538,7 @@ describe('format()', () => {
     expect(rendered).toContain('- **Country:** (GB)');
     expect(rendered).toContain('- **ISO 3166-2 (first level):** Not available');
     expect(rendered).toContain('- **Population:** Not available');
-    expect(rendered).toContain(
-      '- **Elevation:** Not available recorded · Not available DEM (SRTM3)',
-    );
+    expect(rendered).toContain('- **Elevation:** Not available\n');
     expect(rendered).toContain('- **Timezone:** Not available');
     expect(rendered).toContain('- **Bounding box:** Not available');
     expect(rendered).toContain('- **Wikipedia:** Not available');

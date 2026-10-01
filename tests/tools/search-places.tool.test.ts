@@ -152,10 +152,26 @@ describe('input normalization', () => {
     ]);
   });
 
-  it.each(['exact', 'fuzzy', 'NAME_REQUIRED', 'any'])('rejects match %j', async (match) => {
+  it.each(['exact', 'fuzzy', 'any'])('rejects match %j', async (match) => {
     const error = errorOf(await run({ query: 'x', match }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['match'] })]);
+  });
+
+  it.each([
+    ['Exact_Name', [['name_equals', 'Paris']]],
+    ['NAME_PREFIX', [['name_startsWith', 'Paris']]],
+    [
+      'Name_Required',
+      [
+        ['q', 'Paris'],
+        ['isNameRequired', 'true'],
+      ],
+    ],
+  ])('reads match %j in any case', async (match, expected) => {
+    const fetchFake = serve();
+    successOf<Page>(await run({ query: 'Paris', match }));
+    expect(sent(fetchFake)).toEqual([...expected, ...DEFAULT_PAGING]);
   });
 
   it('reads a whitespace-only query as unset', async () => {
@@ -286,7 +302,7 @@ describe('input normalization', () => {
       'cities5000',
       'cities15000',
     ]);
-    for (const cities of ['cities2000', 'city', 'CITIES1000']) {
+    for (const cities of ['cities2000', 'city']) {
       expect(errorOf(await run({ query: 'x', cities })).code).toBe(JsonRpcErrorCode.InvalidParams);
     }
     await run({ query: 'x', cities: ' ' });
@@ -306,6 +322,19 @@ describe('input normalization', () => {
     expect(errorOf(await run({ query: 'x', orderBy: 'elevation' })).code).toBe(
       JsonRpcErrorCode.InvalidParams,
     );
+  });
+
+  it.each(['Population', 'POPULATION'])('reads orderBy %j in any case', async (orderBy) => {
+    const fetchFake = serve();
+    successOf<Page>(await run({ query: 'x', orderBy }));
+    expect(requestedUrls(fetchFake)[0]?.searchParams.get('orderby')).toBe('population');
+  });
+
+  it('says every word enum is case-insensitive', () => {
+    const { match, orderBy, cities } = searchPlacesTool.input.shape;
+    for (const field of [match, orderBy, cities]) {
+      expect(field.description).toContain('Case-insensitive.');
+    }
   });
 
   it.each([[0], [101], [-5], [2.5], ['many']])('rejects limit %j', async (limit) => {
@@ -696,13 +725,33 @@ describe('paging', () => {
     expect(result.notice).toBe('4,000 more places; call again with offset 5000.');
   });
 
-  it.each([4999, 5000])('names the 5,000-row paging limit from offset %i', async (offset) => {
+  it.each([
+    [4995, 10, 5, '5 rows repeat'],
+    [4999, 2, 1, '1 row repeats'],
+  ])(
+    'offers offset 5000 from offset %i (limit %i), since GeoNames still pages there, and names the %i repeated rows',
+    async (offset, limit, _overlap, repeats) => {
+      const page = Array.from({ length: limit }, (_, index) => ({
+        ...SEATTLE_ROW,
+        geonameId: index + 1,
+      }));
+      serve({ totalResultsCount: 9000, geonames: page });
+      const result = successOf<Page>(await run({ query: 'x', limit, offset }));
+      const remaining = (9000 - offset - limit).toLocaleString('en-US');
+      expect(result).toMatchObject({ nextOffset: 5000, truncated: true });
+      expect(result.notice).toBe(
+        `${remaining} more places; call again with offset 5000, the last offset GeoNames' free service accepts (its first ${repeats} this page).`,
+      );
+    },
+  );
+
+  it('names the paging limit at offset 5000, where no later page is reachable', async () => {
     serve({ totalResultsCount: 9000, geonames: rows });
-    const result = successOf<Page>(await run({ query: 'x', limit: 2, offset }));
+    const result = successOf<Page>(await run({ query: 'x', limit: 2, offset: 5000 }));
     expect(result).not.toHaveProperty('nextOffset');
     expect(result.truncated).toBe(true);
     expect(result.notice).toBe(
-      "GeoNames' free service pages only the first 5,000 rows of a search; narrow with countries, featureCodes, or boundingBox to reach the rest.",
+      "GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries, featureCodes, or boundingBox to reach the rest.",
     );
   });
 

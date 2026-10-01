@@ -143,6 +143,33 @@ describe('input normalization', () => {
     expect(sent(fetchFake).map(([name]) => name)).not.toContain('hierarchy');
   });
 
+  it.each(['2147483648', 2147483648])(
+    'rejects geonameId %j, past 2147483647, with a message naming the limit and no request',
+    async (geonameId) => {
+      const fetchFake = serve();
+      const error = errorOf(await run({ geonameId }));
+      expect(error.data?.reason).toBe('invalid_arguments');
+      expect(error.message).toContain('geonameId: Must be at most 2147483647');
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names the id limit in the parent geonameId description', () => {
+    expect(getChildrenTool.input.shape.geonameId.description).toContain('up to 2147483647');
+  });
+
+  it.each([
+    ['Tourism', 'tourism'],
+    ['GEOGRAPHY', 'geography'],
+    ['Administrative', 'administrative'],
+  ])('reads hierarchy %j in any case as %s', async (hierarchy, expected) => {
+    const fetchFake = serve(CHILDREN_CANARIES_TOURISM_BODY);
+    expect(page(await run({ geonameId: '2593110', hierarchy })).hierarchy).toBe(expected);
+    if (expected !== 'administrative') {
+      expect(sent(fetchFake)).toContainEqual(['hierarchy', expected]);
+    }
+  });
+
   it('rejects an unknown hierarchy', async () => {
     const error = errorOf(await run({ geonameId: US, hierarchy: 'political' }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
@@ -504,6 +531,15 @@ describe('leaves and misses', () => {
     });
     expect(allText(result)).toContain('**Found:** false');
     expect(allText(result)).toContain('Find it with geonames_search_places');
+  });
+
+  it('closes a miss with the same total line as every other page', async () => {
+    installService({
+      childrenJSON: () => jsonResponse(statusEnvelope(11, 'no toponym found'), 404),
+    });
+    const text = allText(await run({ geonameId: '999999999' }));
+    expect(text).toContain('**0 total**');
+    expect(text).not.toContain('**totalCount:**');
   });
 
   it('does not cache a miss', async () => {

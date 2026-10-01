@@ -129,6 +129,19 @@ describe('input normalization', () => {
     expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['topic'] })]);
   });
 
+  it.each([
+    ['Feature_Classes', 'feature_classes', 9],
+    ['FEATURE_CODES', 'feature_codes', 684],
+  ])('reads topic %j in any case', async (topic, expected, total) => {
+    const result = page(await run({ topic }));
+    expect(result.topic).toBe(expected);
+    expect(result.totalCount).toBe(total);
+  });
+
+  it('says topic is case-insensitive', () => {
+    expect(listReferenceTool.input.shape.topic.description).toContain('Case-insensitive.');
+  });
+
   it.each([0, -1, 701, 1.5, 'many', null])('rejects limit %j', async (limit) => {
     const error = errorOf(await run({ topic: 'feature_codes', limit }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);

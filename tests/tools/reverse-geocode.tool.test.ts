@@ -266,7 +266,7 @@ describe('input normalization', () => {
     );
   });
 
-  it.each(['cities500', 'cities', 'CITIES1000', 'big'])('rejects cities %j', async (cities) => {
+  it.each(['cities500', 'cities', 'big'])('rejects cities %j', async (cities) => {
     const error = errorOf(await run({ ...PARIS, cities }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['cities'] })]);

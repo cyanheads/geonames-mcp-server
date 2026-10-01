@@ -72,7 +72,9 @@ export const getHierarchyTool = tool('geonames_get_hierarchy', {
             iso3166_2: z
               .string()
               .optional()
-              .describe('ISO 3166-2 code of the first-order admin division.'),
+              .describe(
+                'ISO 3166-2 code of the first-order admin division, subdivision part only: MO, not US-MO.',
+              ),
             lat: z
               .number()
               .optional()

@@ -405,7 +405,7 @@ describe('the country table', () => {
       },
     ]);
     expect(tableRows(textOf(result))[2]).toBe(
-      '| BV / BVT / — / — | Bouvet Island | 3371123 | Not available | Antarctica (AN) | Not available | Not available | Not available | Not available | None | -54.4 / -54.46 / 3.49 / 3.34 |',
+      '| BV / BVT / — / — | Bouvet Island | 3371123 | Not available | Antarctica (AN) | Not available | Not available | Not available | Not available | Not available | -54.4 / -54.46 / 3.49 / 3.34 |',
     );
   });
 
@@ -541,11 +541,11 @@ describe('format()', () => {
     );
   });
 
-  it('prints Not available and None for what a country lacks', async () => {
+  it('prints Not available for what a country lacks, its postal format included', async () => {
     serve();
     const rows = tableRows(textOf(await run({ countries: 'AQ' })));
     expect(rows[2]).toBe(
-      '| AQ / ATA / 010 / AY | Antarctica | 6697173 | Not available | Antarctica (AN) | Not available | 14,000,000 | Not available | Not available | None | -60.5 / -90 / 180 / -180 |',
+      '| AQ / ATA / 010 / AY | Antarctica | 6697173 | Not available | Antarctica (AN) | Not available | 14,000,000 | Not available | Not available | Not available | -60.5 / -90 / 180 / -180 |',
     );
   });
 

@@ -1,7 +1,8 @@
 /**
  * @fileoverview Input schemas and local list semantics shared by every GeoNames tool.
  * Normalizations run in the schema, before validation: blanks from form clients
- * become unset, lists accept a comma-separated string, and codes are upper-cased.
+ * become unset, lists accept a comma-separated string, codes are upper-cased, and
+ * word enums are lower-cased.
  * @module mcp-server/tools/shared-inputs
  */
 
@@ -58,6 +59,13 @@ export function listInput<T extends z.ZodType>(item: T, { max, normalize }: List
 
 const upper = (item: string) => item.toUpperCase();
 
+/** Lower-cases a string before `schema` validates it, so a word enum accepts any case (`Tourism`). */
+export const lowerCased = <T extends z.ZodType>(schema: T) =>
+  z.preprocess(
+    (value: unknown) => (typeof value === 'string' ? value.toLowerCase() : value),
+    schema,
+  );
+
 /** `UK` is ISO's exceptionally reserved code for the United Kingdom; GeoNames keys it as `GB`. */
 export const toAlpha2 = (item: string) => {
   const code = item.toUpperCase();
@@ -80,15 +88,30 @@ export const USERNAME_ALIASES = { username: 'geonamesUsername' } as const;
 /** A geonames.org page or Linked Data URL; capture group 1 is the id. */
 const GEONAMES_URL = /^(?:https?:\/\/)?(?:www\.|sws\.)?geonames\.org\/(\d+)(?:[/?#].*)?$/i;
 
-/** Required GeoNames feature id, as a digit string. */
+/** GeoNames parses an id as a 32-bit integer and rejects anything larger (status 14). */
+const MAX_GEONAME_ID = 2_147_483_647;
+
+/**
+ * Required GeoNames feature id, as a digit string of at most {@link MAX_GEONAME_ID}. A
+ * JSON integer becomes its digit string here, so an out-of-range one gets the range message.
+ */
 export const geonameIdInput = z
   .preprocess(
     (value: unknown) =>
-      typeof value === 'string' ? (GEONAMES_URL.exec(value.trim())?.[1] ?? value.trim()) : value,
-    z.string().regex(/^[1-9]\d{0,9}$/),
+      typeof value === 'string'
+        ? (GEONAMES_URL.exec(value.trim())?.[1] ?? value.trim())
+        : Number.isSafeInteger(value)
+          ? String(value)
+          : value,
+    z
+      .string()
+      .regex(/^[1-9]\d*$/, { error: 'Must be a positive integer such as 5809844.', abort: true })
+      .refine((id) => Number(id) <= MAX_GEONAME_ID, {
+        error: `Must be at most ${MAX_GEONAME_ID}, the largest geonameId GeoNames accepts.`,
+      }),
   )
   .describe(
-    'GeoNames feature id, a positive integer such as 5809844 (Seattle), as returned in geonameId by the other geonames tools. A geonames.org/<id> URL is reduced to its id.',
+    `GeoNames feature id, a positive integer up to ${MAX_GEONAME_ID} such as 5809844 (Seattle), as returned in geonameId by the other geonames tools. A geonames.org/<id> URL is reduced to its id.`,
   );
 
 /** Optional ISO 3166-1 alpha-2 country filter, up to 10 codes. */
@@ -123,9 +146,9 @@ export const featureCodesInput = listInput(
 
 /** Optional population tier for populated places. */
 export const citiesInput = blankAsUnset(
-  z.enum(['cities1000', 'cities5000', 'cities15000']).optional(),
+  lowerCased(z.enum(['cities1000', 'cities5000', 'cities15000']).optional()),
 ).describe(
-  "Keep only populated places with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers.",
+  "Keep only populated places with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. Case-insensitive.",
 );
 
 /** Latitude in decimal degrees. */
@@ -144,7 +167,7 @@ export const lngInput = z
 
 /** Optional local name filter; see {@link nameMatcher}. */
 export const nameContainsInput = blankAsUnset(z.string().max(100).optional()).describe(
-  'Keep only entries whose name contains every word of this text, ignoring case, accents, and punctuation.',
+  'Keep only entries whose name contains every word of this text as a substring (kansas also matches Arkansas), ignoring case, accents, and punctuation.',
 );
 
 /** A `limit` input: 1–`max`, `fallback` when omitted or blank. */

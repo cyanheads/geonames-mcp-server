@@ -55,7 +55,9 @@ export interface AdminLevel {
 
 /** Timezone block of a full place record. */
 export interface PlaceTimezone {
+  /** UTC offset in hours on 1 July (GeoNames' `dstOffset`). */
   dstOffsetInHours?: number;
+  /** UTC offset in hours on 1 January (GeoNames' `gmtOffset`). */
   gmtOffsetInHours?: number;
   timezoneId?: string;
 }
@@ -113,7 +115,9 @@ export interface Ocean {
 export interface TimezoneInfo {
   countryCode?: string;
   countryName?: string;
+  /** UTC offset in hours on 1 July (GeoNames' `dstOffset`). */
   dstOffsetInHours: number;
+  /** UTC offset in hours on 1 January (GeoNames' `gmtOffset`). */
   gmtOffsetInHours: number;
   /** GeoNames' local `YYYY-MM-DD HH:mm`. */
   localTime?: string;
