@@ -18,6 +18,7 @@ import {
 import { ResponseCache } from './response-cache.js';
 import {
   type Body,
+  isRecord,
   parseChildren,
   parseCountries,
   parseOcean,
@@ -86,7 +87,7 @@ export interface GeoNamesServiceOptions {
   fetch?: FetchLike;
   now?: () => number;
   /** The operator's `GEONAMES_USERNAME`, used when a call passes none. */
-  serverUsername?: string;
+  serverUsername?: string | undefined;
 }
 
 /**
@@ -124,7 +125,7 @@ interface CallSpec<T> {
   /** Predicate for storing a success; misses such as `found: false` are not cached. */
   cacheable?: (value: T) => boolean;
   /** Ladder budget; defaults to 20 s. */
-  deadlineMs?: number;
+  deadlineMs?: number | undefined;
   endpoint: string;
   params: QueryParams;
   parse: (payload: Payload) => T;
@@ -143,9 +144,6 @@ interface ReadBody {
   text: string;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
 /** Returns the body for a `body` payload; a result status yields `onMiss`. */
 function bodyOr<T>(payload: Payload, onMiss: T, parse: (body: Body) => T): T {
   return payload.kind === 'miss' ? onMiss : parse(payload.body);
@@ -153,7 +151,7 @@ function bodyOr<T>(payload: Payload, onMiss: T, parse: (body: Body) => T): T {
 
 /** Endpoint + sorted params: the account never enters a cache key. */
 function cacheKeyOf(endpoint: string, params: QueryParams): string {
-  const sorted = [...params].sort(([a, av], [b, bv]) => a.localeCompare(b) || av.localeCompare(bv));
+  const sorted = params.toSorted(([a, av], [b, bv]) => a.localeCompare(b) || av.localeCompare(bv));
   return `${endpoint}?${new URLSearchParams(sorted.map(([k, v]) => [k, v])).toString()}`;
 }
 
@@ -379,7 +377,7 @@ export class GeoNamesService {
         ],
         ttlMs: DAY_MS,
         parse: (payload) => bodyOr(payload, undefined, parseOcean),
-        ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+        deadlineMs: options.deadlineMs,
       },
       account,
       ctx,

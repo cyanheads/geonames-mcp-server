@@ -8,22 +8,23 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import type {
-  AdminLevel,
-  AlternateName,
-  BoundingBox,
-  ChildrenResult,
-  CountryInfo,
-  ExternalIdentifier,
-  Ocean,
-  PlaceRecord,
-  PlaceTimezone,
-  PostalCode,
-  PostalCountry,
-  SearchResult,
-  Subdivision,
-  TimezoneInfo,
-  Toponym,
+import {
+  type AdminLevel,
+  type AlternateName,
+  type BoundingBox,
+  type ChildrenResult,
+  type CountryInfo,
+  type ExternalIdentifier,
+  IDENTIFIER_TYPES,
+  type Ocean,
+  type PlaceRecord,
+  type PlaceTimezone,
+  type PostalCode,
+  type PostalCountry,
+  type SearchResult,
+  type Subdivision,
+  type TimezoneInfo,
+  type Toponym,
 } from './types.js';
 import { upstreamUnexpectedShape, upstreamUnreadable } from './upstream-errors.js';
 
@@ -37,7 +38,8 @@ function prune<T extends object>(value: Pruned<T>): T {
   return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as T;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
+/** A plain JSON object: not null, not an array. */
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** A non-blank string, else `undefined`. */
@@ -182,7 +184,10 @@ const PlaceRecordSchema = ToponymRowSchema.extend({
   alternateNames: z.array(AlternateNameSchema).optional(),
 });
 
-const IDENTIFIER_LANGS = new Set<string>(['faac', 'iata', 'icao', 'tcid', 'unlc', 'wkdt']);
+const IDENTIFIER_LANGS: ReadonlySet<string> = new Set(IDENTIFIER_TYPES);
+
+const isIdentifierLang = (lang: string | undefined): lang is ExternalIdentifier['type'] =>
+  lang !== undefined && IDENTIFIER_LANGS.has(lang);
 
 /** GeoNames' `srtm3` / `astergdem` no-data values. */
 const DEM_NO_DATA = new Set([-32768, -9999]);
@@ -220,8 +225,8 @@ export function parsePlace(body: Body): PlaceRecord {
   for (const entry of row.alternateNames ?? []) {
     if (entry.lang === 'post') postalCodes.push(entry.name);
     else if (entry.lang === 'link') links.push(entry.name);
-    else if (entry.lang !== undefined && IDENTIFIER_LANGS.has(entry.lang)) {
-      identifiers.push({ type: entry.lang as ExternalIdentifier['type'], value: entry.name });
+    else if (isIdentifierLang(entry.lang)) {
+      identifiers.push({ type: entry.lang, value: entry.name });
     } else {
       alternateNames.push(
         prune<AlternateName>({

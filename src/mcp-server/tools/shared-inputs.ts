@@ -36,7 +36,7 @@ export interface ListInputOptions {
   /** Most items accepted; the preprocess keeps one more so `.max()` still reports overflow. */
   max: number;
   /** Per-item normalization applied after trimming, before validation. */
-  normalize?: (item: string) => string;
+  normalize: (item: string) => string;
 }
 
 /**
@@ -49,15 +49,11 @@ export function listInput<T extends z.ZodType>(item: T, { max, normalize }: List
     const raw = typeof value === 'string' ? value.split(',') : value;
     if (!Array.isArray(raw)) return raw;
     const items = raw
-      .map((entry: unknown) =>
-        typeof entry === 'string' ? (normalize?.(entry.trim()) ?? entry.trim()) : entry,
-      )
+      .map((entry: unknown) => (typeof entry === 'string' ? normalize(entry.trim()) : entry))
       .filter((entry) => entry !== '');
     return items.length === 0 ? undefined : items.slice(0, max + 1);
   }, z.array(item).max(max).optional());
 }
-
-const upper = (item: string) => item.toUpperCase();
 
 /** Lower-cases a string before `schema` validates it, so a word enum accepts any case (`Tourism`). */
 export const lowerCased = <T extends z.ZodType>(schema: T) =>
@@ -128,7 +124,7 @@ export const countriesInput = listInput(
 /** Optional feature-class filter, up to all nine classes. */
 export const featureClassesInput = listInput(
   z.enum(FEATURE_CLASS_CODES).describe('One-letter GeoNames feature class.'),
-  { max: 9, normalize: upper },
+  { max: 9, normalize: (item) => item.toUpperCase() },
 ).describe(
   'GeoNames feature classes: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. A list or a comma-separated string; case-insensitive.',
 );
@@ -202,7 +198,7 @@ export function nameMatcher(query: string): (fields: readonly (string | undefine
   const tokens = normalizeForMatch(query).split(/\s+/).filter(Boolean);
   return (fields) => {
     const haystack = fields
-      .filter((field): field is string => field !== undefined)
+      .filter((field) => field !== undefined)
       .map(normalizeForMatch)
       .join(' ');
     return tokens.every((token) => haystack.includes(token));

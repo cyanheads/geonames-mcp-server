@@ -20,7 +20,7 @@ await createApp({
   setup(core) {
     sanitization.setSensitiveFields(['geonamesUsername', 'username']);
     const { username } = getServerConfig();
-    initGeoNamesService(username === undefined ? {} : { serverUsername: username });
+    initGeoNamesService({ serverUsername: username });
     if (username === undefined) {
       core.logger.warning(
         'GEONAMES_USERNAME is not set: every GeoNames call must pass geonamesUsername (the bundled geonames_list_reference topics need none).',

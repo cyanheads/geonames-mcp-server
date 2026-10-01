@@ -257,12 +257,7 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
           ctx,
         )
       : await service.postalSearch(
-          {
-            limit: input.limit,
-            ...(postalCode === undefined ? {} : { postalCode }),
-            ...(placeName === undefined ? {} : { placeName }),
-            ...(countries === undefined ? {} : { countries }),
-          },
+          { limit: input.limit, postalCode, placeName, countries },
           account,
           ctx,
         );

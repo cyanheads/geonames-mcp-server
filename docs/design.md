@@ -420,11 +420,11 @@ withRetry(deadline) ─► pacer[account].run ─► plain fetch ─► bounded 
 
 | Seam | Option | Used for |
 |:-----|:-------|:---------|
-| HTTP | `fetch?: typeof fetch` (default global `fetch`) | `createFetchMock` routes per endpoint; status-envelope cases (401/10, 404/11, 200/15, 200/18-19-20 with a message naming the account, 200/25), each asserting the account name appears in no message, `data`, or log record; the leaf `{"totalResultsCount":0,"geonames":[]}`; the offshore `timezoneJSON` and `oceanJSON` (`geonameId: 0`) bodies; over-ceiling and HTML bodies |
+| HTTP | `fetch?: FetchLike`, `(url: string, init?: RequestInit) => Promise<Response>` (default global `fetch`) | `createFetchMock` routes per endpoint; status-envelope cases (401/10, 404/11, 200/15, 200/18-19-20 with a message naming the account, 200/25), each asserting the account name appears in no message, `data`, or log record; the leaf `{"totalResultsCount":0,"geonames":[]}`; the offshore `timezoneJSON` and `oceanJSON` (`geonameId: 0`) bodies; over-ceiling and HTML bodies |
 | Clock | `now?: () => number` (default `Date.now`) | cache TTL expiry, LRU eviction order |
 | Pacer factory | `createPacer?: typeof createPacer` | inert pacer in unit tests; real pacer with fake timers for the cooldown test |
 | Upstream base | `baseUrl?: string` (default `https://secure.geonames.org`) | pointing at a loopback fixture server in integration tests |
-| Server account | `serverUsername?: string` | the `server` vs `caller` attribution paths |
+| Server account | `serverUsername?: string \| undefined` (absent or `undefined`: no server account) | the `server` vs `caller` attribution paths |
 
 The feature-code table is a checked-in module (the file source); tests import the real table. `setup()` constructs the service from `getServerConfig()` and the defaults.
 

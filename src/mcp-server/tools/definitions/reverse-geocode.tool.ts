@@ -342,18 +342,10 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
     const nearbyParams = { lat, lng, radiusKm, limit: nearbyLimit };
     let nearbyLeg: Promise<Toponym[]> = Promise.resolve([]);
     if (nearbyKind === 'populated_places') {
-      nearbyLeg = service.nearbyPlaces(
-        { ...nearbyParams, ...(cities === undefined ? {} : { cities }) },
-        account,
-        ctx,
-      );
+      nearbyLeg = service.nearbyPlaces({ ...nearbyParams, cities }, account, ctx);
     } else if (nearbyKind === 'features') {
       nearbyLeg = service.nearbyFeatures(
-        {
-          ...nearbyParams,
-          ...(featureClasses === undefined ? {} : { featureClasses }),
-          ...(featureCodes === undefined ? {} : { featureCodes }),
-        },
+        { ...nearbyParams, featureClasses, featureCodes },
         account,
         ctx,
       );

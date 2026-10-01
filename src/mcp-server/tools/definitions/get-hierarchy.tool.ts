@@ -25,8 +25,6 @@ const toLink = ({
   ...link
 }: Toponym) => link;
 
-const cell = (value: string | undefined): string => (value === undefined ? '—' : tableCell(value));
-
 export const getHierarchyTool = tool('geonames_get_hierarchy', {
   title: 'Get a GeoNames hierarchy',
   description:
@@ -197,7 +195,7 @@ export const getHierarchyTool = tool('geonames_get_hierarchy', {
             link.geonameId,
             name,
             feature || '—',
-            cell(link.countryCode),
+            link.countryCode === undefined ? '—' : tableCell(link.countryCode),
             admin1 || '—',
             link.population === undefined ? '—' : link.population.toLocaleString('en-US'),
             link.lat === undefined || link.lng === undefined ? '—' : `${link.lat}, ${link.lng}`,

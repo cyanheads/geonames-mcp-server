@@ -14,11 +14,10 @@ import {
   USERNAME_ALIASES,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
+import { type ExternalIdentifier, IDENTIFIER_TYPES } from '@/services/geonames/types.js';
 import { inlineText, plainUrl } from '@/utils/inline-text.js';
 
-const IDENTIFIER_TYPES = ['iata', 'icao', 'faac', 'tcid', 'unlc', 'wkdt'] as const;
-
-const IDENTIFIER_LABELS: Record<(typeof IDENTIFIER_TYPES)[number], string> = {
+const IDENTIFIER_LABELS: Record<ExternalIdentifier['type'], string> = {
   iata: 'IATA',
   icao: 'ICAO',
   faac: 'FAA',

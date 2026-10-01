@@ -1,7 +1,8 @@
 /**
  * @fileoverview Domain types for the GeoNames service: normalized rows with
  * GeoNames' absence placeholders (`population: 0`, `geonameId: 0`, `adminCode1: "00"`,
- * empty strings) dropped, and string numbers parsed.
+ * empty strings) dropped, and string numbers parsed. The external-identifier types
+ * are also a runtime list, so the parser and the output schema share one source.
  * @module services/geonames/types
  */
 
@@ -70,9 +71,12 @@ export interface AlternateName {
   name: string;
 }
 
+/** The GeoNames pseudo-languages that carry an external identifier, in display order. */
+export const IDENTIFIER_TYPES = ['iata', 'icao', 'faac', 'tcid', 'unlc', 'wkdt'] as const;
+
 /** External identifier carried as a GeoNames pseudo-language alternate name. */
 export interface ExternalIdentifier {
-  type: 'faac' | 'iata' | 'icao' | 'tcid' | 'unlc' | 'wkdt';
+  type: (typeof IDENTIFIER_TYPES)[number];
   value: string;
 }
 
@@ -179,19 +183,22 @@ export type SearchMatch = 'any_field' | 'exact_name' | 'name_prefix' | 'name_req
 /** Population tier filter (`cities`). */
 export type CitiesTier = 'cities1000' | 'cities5000' | 'cities15000';
 
-/** `searchJSON` parameters, mapped onto GeoNames' allowlisted names by the service. */
+/**
+ * `searchJSON` parameters, mapped onto GeoNames' allowlisted names by the service.
+ * Like every parameter bag below, an optional field may also be passed as `undefined`.
+ */
 export interface SearchParams {
-  boundingBox?: BoundingBox;
-  cities?: CitiesTier;
-  countries?: readonly string[];
-  featureClasses?: readonly FeatureClass[];
-  featureCodes?: readonly string[];
+  boundingBox?: BoundingBox | undefined;
+  cities?: CitiesTier | undefined;
+  countries?: readonly string[] | undefined;
+  featureClasses?: readonly FeatureClass[] | undefined;
+  featureCodes?: readonly string[] | undefined;
   limit: number;
   /** Applied only with `query`. */
-  match?: SearchMatch;
+  match?: SearchMatch | undefined;
   offset: number;
-  orderBy?: 'population' | 'relevance';
-  query?: string;
+  orderBy?: 'population' | 'relevance' | undefined;
+  query?: string | undefined;
 }
 
 /** `searchJSON` result. */
@@ -213,21 +220,21 @@ export interface NearbyParams {
 
 /** `findNearbyPlaceNameJSON` parameters. */
 export interface NearbyPlacesParams extends NearbyParams {
-  cities?: CitiesTier;
+  cities?: CitiesTier | undefined;
 }
 
 /** `findNearbyJSON` parameters. */
 export interface NearbyFeaturesParams extends NearbyParams {
-  featureClasses?: readonly FeatureClass[];
-  featureCodes?: readonly string[];
+  featureClasses?: readonly FeatureClass[] | undefined;
+  featureCodes?: readonly string[] | undefined;
 }
 
 /** `postalCodeSearchJSON` parameters (code or place name). */
 export interface PostalSearchParams {
-  countries?: readonly string[];
+  countries?: readonly string[] | undefined;
   limit: number;
-  placeName?: string;
-  postalCode?: string;
+  placeName?: string | undefined;
+  postalCode?: string | undefined;
 }
 
 /** `findNearbyPostalCodesJSON` parameters. */

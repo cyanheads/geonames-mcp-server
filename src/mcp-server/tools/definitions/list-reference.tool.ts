@@ -232,13 +232,13 @@ export const listReferenceTool = tool('geonames_list_reference', {
       case 'postal_countries': {
         const service = getGeoNamesService();
         const account = service.resolveAccount(input.geonamesUsername);
-        entries = (await service.postalCountries(account, ctx)).map((country) => ({
-          code: country.countryCode,
-          name: country.countryName,
-          postalCodeCount: country.postalCodeCount,
-          ...(country.minPostalCode === undefined ? {} : { minPostalCode: country.minPostalCode }),
-          ...(country.maxPostalCode === undefined ? {} : { maxPostalCode: country.maxPostalCode }),
-        }));
+        entries = (await service.postalCountries(account, ctx)).map(
+          ({ countryCode, countryName, ...postal }) => ({
+            code: countryCode,
+            name: countryName,
+            ...postal,
+          }),
+        );
         break;
       }
     }
