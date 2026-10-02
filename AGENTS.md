@@ -1,10 +1,10 @@
 # Developer Protocol
 
 **Server:** geonames-mcp-server
-**Version:** 0.1.1
+**Version:** 0.1.2
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.10`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.1.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
 **Zod:** ^4.6.5
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -253,10 +253,11 @@ src/
       response-parsers.ts               # Per-endpoint row parsing and placeholder dropping
       upstream-errors.ts                # GeoNames status → typed errors
       feature-codes.ts                  # Bundled feature classes and codes
+      country-codes.ts                  # Bundled ISO 3166-1 alpha-2, alpha-3, and numeric country codes
       types.ts                          # Domain types
   mcp-server/
     tools/
-      shared-inputs.ts                  # Shared input schemas, list/blank preprocessing, paging
+      shared-inputs.ts                  # Shared input schemas, list/blank preprocessing, pre-request checks, paging
       definitions/
         index.ts                        # allToolDefinitions barrel
         [tool-name].tool.ts             # The eight geonames_* tools

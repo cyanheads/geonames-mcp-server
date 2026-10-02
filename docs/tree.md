@@ -1,6 +1,6 @@
 # geonames-mcp-server - Directory Structure
 
-Generated on: 2026-10-01 09:17:43
+Generated on: 2026-10-01 23:53:38
 
 ```text
 geonames-mcp-server/
@@ -150,6 +150,7 @@ geonames-mcp-server/
 │   │       └── shared-inputs.ts
 │   ├── services/
 │   │   └── geonames/
+│   │       ├── country-codes.ts
 │   │       ├── feature-codes.ts
 │   │       ├── geonames-service.ts
 │   │       ├── response-cache.ts
@@ -173,6 +174,7 @@ geonames-mcp-server/
 │   │   ├── response-parsers.test.ts
 │   │   └── upstream-errors.test.ts
 │   ├── shared/
+│   │   ├── country-codes.test.ts
 │   │   ├── feature-codes.test.ts
 │   │   ├── inline-text.test.ts
 │   │   ├── server-config.test.ts
