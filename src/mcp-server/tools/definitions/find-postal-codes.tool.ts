@@ -17,6 +17,7 @@ import {
   lngInput,
   lowerCased,
   USERNAME_ALIASES,
+  unknownCountryCodes,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { type GeoNamesAccount, getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import { reasonOf } from '@/services/geonames/upstream-errors.js';
@@ -102,7 +103,7 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
       "Search radius in kilometres for mode nearby, above 0 and at most 30 (GeoNames' free-tier limit). Default 10.",
     ),
     countries: countriesInput.describe(
-      'Keep only postal codes in these countries: ISO 3166-1 alpha-2 codes (US, GB, DE), up to 10, as a list or a comma-separated string. Case-insensitive; UK is accepted for GB. Modes code and place_name only.',
+      'Keep only postal codes in these countries: ISO 3166-1 codes, up to 10, as a list or a comma-separated string: alpha-2 (US, GB, DE), alpha-3 (USA, GBR, DEU), or three-digit numeric (840, 826, 276), each sent to GeoNames as alpha-2. Case-insensitive; UK is accepted for GB. Modes code and place_name only.',
     ),
     limit: limitInput(MAX_LIMIT, 10),
     geonamesUsername: geonamesUsernameInput,
@@ -179,6 +180,14 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
       severity: 'notice',
     },
     {
+      reason: 'unknown_country_code',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A countries entry is a well-formed alpha-3 or three-digit numeric code that no country has.',
+      recovery:
+        'Find the country with geonames_get_countries (nameContains matches its name), then call again with its alpha-2, alpha-3, or numeric code.',
+      severity: 'notice',
+    },
+    {
       reason: 'username_required',
       code: JsonRpcErrorCode.Unauthorized,
       when: "Neither geonamesUsername nor the server's GEONAMES_USERNAME supplies a GeoNames account.",
@@ -246,6 +255,11 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
         );
       }
       point = { lat, lng };
+    }
+    const unknownCountries = unknownCountryCodes(countries);
+    if (unknownCountries !== undefined) {
+      const { message, ...offending } = unknownCountries;
+      throw ctx.fail('unknown_country_code', message, offending);
     }
 
     const service = getGeoNamesService();

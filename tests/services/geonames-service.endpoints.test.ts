@@ -31,8 +31,10 @@ import {
   statusEnvelope,
   TIMEZONE_OFFSHORE_BODY,
   TIMEZONE_PARIS_BODY,
+  TIMEZONE_REYKJAVIK_BODY,
   textResponse,
 } from '../fixtures/geonames-upstream.js';
+import { SUBDIVISION_HUDSON_BUFFERED_BODY } from '../fixtures/geonames-upstream-spatial.js';
 import {
   inertCreatePacer,
   makeContext,
@@ -434,7 +436,6 @@ describe('children', () => {
   it.each([
     ['administrative', []],
     ['tourism', [['hierarchy', 'tourism']]],
-    ['geography', [['hierarchy', 'geography']]],
     ['dependency', [['hierarchy', 'dependency']]],
   ] as const)('requests the whole list for the %s tree', async (hierarchy, extra) => {
     const { fetch, service, account } = setup('childrenJSON', CHILDREN_ENGLAND_BODY);
@@ -541,6 +542,61 @@ describe('subdivision', () => {
     await expect(service.subdivision(30, -40, account, ctx)).resolves.toBeUndefined();
     await expect(service.subdivision(30, -40, account, ctx)).resolves.toBeUndefined();
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends no radius for a buffer of 0, sharing the unbuffered cache entry', async () => {
+    const { fetch, service, account } = setup('countrySubdivisionJSON', SUBDIVISION_PARIS_BODY);
+    await service.subdivision(48.8566, 2.3522, account, ctx, { bufferKm: 0 });
+    await service.subdivision(48.8566, 2.3522, account, ctx);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(paramsOf(requestedUrls(fetch)[0] as URL)).toEqual([
+      ['lat', '48.8566'],
+      ['lng', '2.3522'],
+      ['level', '5'],
+    ]);
+  });
+
+  it.each([
+    [5, '5'],
+    [0.14, '0.14'],
+    [50, '50'],
+  ])('sends a buffer of %j km as radius %j, and never maxRows', async (bufferKm, radius) => {
+    const { fetch, service, account } = setup(
+      'countrySubdivisionJSON',
+      SUBDIVISION_HUDSON_BUFFERED_BODY,
+    );
+    await service.subdivision(40.69, -74.03, account, ctx, { bufferKm });
+    expect(paramsOf(requestedUrls(fetch)[0] as URL)).toEqual([
+      ['lat', '40.69'],
+      ['lng', '-74.03'],
+      ['level', '5'],
+      ['radius', radius],
+    ]);
+  });
+
+  it('caches each buffer apart from the unbuffered lookup of the same point', async () => {
+    const fetch = routedFetch({
+      countrySubdivisionJSON: (url) =>
+        url.searchParams.has('radius')
+          ? jsonResponse(SUBDIVISION_HUDSON_BUFFERED_BODY)
+          : jsonResponse(statusEnvelope(15, 'no administrative subdivision found')),
+    });
+    const service = makeService(fetch);
+    const account = service.resolveAccount(undefined);
+    await expect(service.subdivision(40.69, -74.03, account, ctx)).resolves.toBeUndefined();
+    const buffered = await service.subdivision(40.69, -74.03, account, ctx, { bufferKm: 5 });
+    expect(buffered?.country).toEqual({
+      countryCode: 'US',
+      countryName: 'United States',
+      distanceInKm: 0.134,
+    });
+    await service.subdivision(40.69, -74.03, account, ctx, { bufferKm: 5 });
+    await service.subdivision(40.69, -74.03, account, ctx, { bufferKm: 3 });
+    expect(requestedUrls(fetch).map((url) => url.searchParams.get('radius'))).toEqual([
+      null,
+      '5',
+      '3',
+    ]);
   });
 });
 
@@ -673,11 +729,21 @@ describe('timezone', () => {
     });
   });
 
-  it('parses the offshore answer as the three offsets only', async () => {
+  it('parses the offshore answer as the three offsets only, the 1 July one taken from the standard offset', async () => {
     const { service, account } = setup('timezoneJSON', TIMEZONE_OFFSHORE_BODY);
     await expect(service.timezone(30, -40, account, ctx)).resolves.toEqual({
       rawOffsetInHours: -3,
       gmtOffsetInHours: -3,
+      dstOffsetInHours: -3,
+    });
+  });
+
+  it('keeps the 0 offsets of a land zone at UTC+0', async () => {
+    const { service, account } = setup('timezoneJSON', TIMEZONE_REYKJAVIK_BODY);
+    await expect(service.timezone(64.1355, -21.8954, account, ctx)).resolves.toMatchObject({
+      timezoneId: 'Atlantic/Reykjavik',
+      rawOffsetInHours: 0,
+      gmtOffsetInHours: 0,
       dstOffsetInHours: 0,
     });
   });

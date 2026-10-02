@@ -15,6 +15,7 @@ import {
   CALLER_USERNAME,
   COUNTRY_SPARSE_BODY,
   COUNTRY_TABLE_BODY,
+  COUNTRY_TABLE_WITH_KOSOVO_BODY,
   jsonResponse,
   SERVER_USERNAME,
   statusEnvelope,
@@ -242,6 +243,65 @@ describe('continent and name filters', () => {
         ),
       ),
     ).toEqual(['GB']);
+  });
+});
+
+describe('code forms', () => {
+  it('answers every form of every table code with the same row, and lists none as notFound', async () => {
+    serve();
+    for (const row of COUNTRY_TABLE_BODY.geonames.filter((entry) => entry !== undefined)) {
+      const { countryCode, isoAlpha3, isoNumeric } = row;
+      const byAlpha2 = successOf<Page>(await run({ countries: countryCode }));
+      expect(codesOf(byAlpha2)).toEqual([countryCode]);
+      for (const code of [isoAlpha3, isoAlpha3.toLowerCase(), isoNumeric]) {
+        const page = successOf<Page>(await run({ countries: code }));
+        expect(page.countries, code).toEqual(byAlpha2.countries);
+        expect(page.notFound, code).toEqual([]);
+      }
+    }
+  });
+
+  it('answers a mixed request with each country once, in table order', async () => {
+    serve();
+    const page = successOf<Page>(await run({ countries: 'usa, ATA, 276, gb, FRA, 840' }));
+    expect(codesOf(page)).toEqual(['AQ', 'DE', 'FR', 'GB', 'US']);
+    expect(page.notFound).toEqual([]);
+  });
+});
+
+describe('Kosovo, which has no ISO numeric code', () => {
+  const serveWithKosovo = () => serve(COUNTRY_TABLE_WITH_KOSOVO_BODY);
+
+  it.each(['XK', 'xk', 'XKX'])('returns Kosovo for %j, with no isoNumeric', async (code) => {
+    serveWithKosovo();
+    const page = successOf<Page>(await run({ countries: code }));
+    expect(codesOf(page)).toEqual(['XK']);
+    expect(page.countries[0]).toMatchObject({ isoAlpha3: 'XKX', fipsCode: 'KV' });
+    expect(page.countries[0]).not.toHaveProperty('isoNumeric');
+    expect(page.notFound).toEqual([]);
+  });
+
+  it('resolves no country for 000, which ISO never assigns', async () => {
+    serveWithKosovo();
+    const result = await run({ countries: '000' });
+    const page = successOf<Page>(result);
+    expect(page).toMatchObject({ countries: [], notFound: ['000'], totalCount: 0 });
+    expect(textOf(result)).toContain('**No GeoNames country for:** 000');
+  });
+
+  it('keeps every other numeric code', async () => {
+    serveWithKosovo();
+    const page = successOf<Page>(await run({ countries: ['000', 'XK', '840', '276'] }));
+    expect(codesOf(page)).toEqual(['DE', 'US', 'XK']);
+    expect(page.notFound).toEqual(['000']);
+  });
+
+  it('renders a dash in the numeric slot', async () => {
+    serveWithKosovo();
+    const rows = tableRows(textOf(await run({ countries: 'XK' })));
+    expect(rows[2]).toBe(
+      '| XK / XKX / — / KV | Kosovo | 831053 | Pristina | Europe (EU) | 1,845,300 | 10,908 | sq, sr | EUR | Not available | 43.2676851730001 / 41.857641001 / 21.7898670000001 / 20.014284 |',
+    );
   });
 });
 

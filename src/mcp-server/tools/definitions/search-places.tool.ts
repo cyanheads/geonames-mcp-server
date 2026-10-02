@@ -13,12 +13,14 @@ import {
   countriesInput,
   featureClassesInput,
   featureCodesInput,
+  featureFilterMismatch,
   geonamesUsernameInput,
   isBlank,
   limitInput,
   lowerCased,
   offsetInput,
   USERNAME_ALIASES,
+  unknownCountryCodes,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getFeatureCode } from '@/services/geonames/feature-codes.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
@@ -36,6 +38,14 @@ const toPlace = ({ countryGeonameId: _countryId, distanceInKm: _distance, ...pla
 
 const orNotAvailable = (value: string | undefined): string =>
   value === undefined ? 'Not available' : tableCell(value);
+
+/** feature_filter_mismatch recovery, one sentence per restriction; a throw carries those its call breaks. */
+const MISMATCH_RECOVERY = {
+  lists:
+    'Call geonames_search_places again with featureCodes alone (each code implies its class) or featureClasses alone; for a whole class plus codes of another class, make one call per class.',
+  cities:
+    'cities keeps only class P: beside it, list only P or class-P codes such as PPLC, or drop cities.',
+};
 
 /**
  * A boundingBox bound. A blank or missing bound fails with a message that says so and
@@ -192,11 +202,26 @@ export const searchPlacesTool = tool('geonames_search_places', {
       severity: 'notice',
     },
     {
+      reason: 'unknown_country_code',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A countries entry is a well-formed alpha-3 or three-digit numeric code that no country has.',
+      recovery:
+        'Find the country with geonames_get_countries (nameContains matches its name), then call again with its alpha-2, alpha-3, or numeric code.',
+      severity: 'notice',
+    },
+    {
       reason: 'unknown_feature_code',
       code: JsonRpcErrorCode.ValidationError,
       when: 'A featureCodes entry is not a GeoNames feature code.',
       recovery:
         'Look up valid codes with geonames_list_reference topic feature_codes, then retry with a listed code.',
+      severity: 'notice',
+    },
+    {
+      reason: 'feature_filter_mismatch',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "featureClasses and featureCodes are both set and a code's class is not listed or a listed class has no listed code, or cities (class P only) is set beside another class or a code outside class P. GeoNames intersects the filters, so those entries match nothing.",
+      recovery: `${MISMATCH_RECOVERY.lists} ${MISMATCH_RECOVERY.cities}`,
       severity: 'notice',
     },
     {
@@ -286,6 +311,11 @@ export const searchPlacesTool = tool('geonames_search_places', {
         `geonames_search_places needs query or a narrowing filter (countries, featureClasses, featureCodes, boundingBox)${cities === undefined ? '' : '; cities alone does not narrow enough'}.`,
       );
     }
+    const unknownCountries = unknownCountryCodes(countries);
+    if (unknownCountries !== undefined) {
+      const { message, ...offending } = unknownCountries;
+      throw ctx.fail('unknown_country_code', message, offending);
+    }
     const unknownCodes = featureCodes?.filter((code) => getFeatureCode(code) === undefined) ?? [];
     if (unknownCodes.length > 0) {
       throw ctx.fail(
@@ -293,6 +323,20 @@ export const searchPlacesTool = tool('geonames_search_places', {
         `Not a GeoNames feature code: ${unknownCodes.join(', ')}.`,
         { featureCodes: unknownCodes },
       );
+    }
+    const mismatch = featureFilterMismatch({ featureClasses, featureCodes, cities });
+    if (mismatch !== undefined) {
+      const { message, ...offending } = mismatch;
+      const listsDisagree =
+        cities === undefined ||
+        featureFilterMismatch({ featureClasses, featureCodes }) !== undefined;
+      const hint = [
+        listsDisagree && MISMATCH_RECOVERY.lists,
+        cities !== undefined && MISMATCH_RECOVERY.cities,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      throw ctx.fail('feature_filter_mismatch', message, { ...offending, recovery: { hint } });
     }
     if (
       boundingBox !== undefined &&

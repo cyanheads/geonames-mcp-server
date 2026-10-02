@@ -3,7 +3,8 @@
  * endpoint's root key (missing → unreadable), validates the rows with Zod (mismatch
  * → unexpected shape), then normalizes: string numbers parsed, and GeoNames'
  * absence placeholders (`population: 0`, `geonameId: 0`, `adminCode1: "00"`,
- * empty strings, the -32768/-9999 DEM sentinels) dropped.
+ * `isoNumeric: "0"`, empty strings, the -32768/-9999 DEM sentinels) dropped. The
+ * offshore timezone's `dstOffset: 0` placeholder takes `rawOffset` instead.
  * @module services/geonames/response-parsers
  */
 
@@ -70,6 +71,12 @@ function coordinates(lat: unknown, lng: unknown): { lat?: number; lng?: number }
   const longitude = toNumber(lng);
   return latitude === undefined || longitude === undefined ? {} : { lat: latitude, lng: longitude };
 }
+
+/** An ISO 3166-1 numeric code; GeoNames sends `"0"` for a country ISO gives none (Kosovo). */
+const isoNumeric = (value: unknown): string | undefined => {
+  const code = codeText(value);
+  return code !== undefined && Number(code) === 0 ? undefined : code;
+};
 
 /** Admin codes, with the `"00"` that GeoNames puts on country rows dropped. */
 const adminCode = (value: unknown): string | undefined => {
@@ -277,7 +284,16 @@ const SubdivisionSchema = z.looseObject({
     .optional(),
 });
 
-/** `countrySubdivisionJSON?level=5`: country plus ADM1–ADM5 with ISO 3166-2 codes. */
+/**
+ * The km from the point to a country matched within the `radius` buffer, to the metre. A
+ * contained point reports `distance: 0`, so only a positive gap is kept.
+ */
+function bufferGap(value: unknown): number | undefined {
+  const km = toNumber(value);
+  return km === undefined ? undefined : positive(Math.round(km * 1000) / 1000);
+}
+
+/** `countrySubdivisionJSON?level=5[&radius]`: country plus ADM1–ADM5 with ISO 3166-2 codes. */
 export function parseSubdivision(body: Body): Subdivision {
   const row = validate(body, 'countryCode', SubdivisionSchema, 'countrySubdivisionJSON');
   const adminLevels: AdminLevel[] = [];
@@ -306,6 +322,7 @@ export function parseSubdivision(body: Body): Subdivision {
         : prune<NonNullable<Subdivision['country']>>({
             countryCode,
             countryName: text(row.countryName),
+            distanceInKm: bufferGap(row.distance),
           }),
     adminLevels,
   });
@@ -325,16 +342,21 @@ const TimezoneSchema = z.looseObject({
   dstOffset: z.number(),
 });
 
-/** `timezoneJSON`; offshore answers carry only the three offsets. */
+/**
+ * `timezoneJSON`; offshore answers carry only the three offsets. Without a `timezoneId`,
+ * `dstOffset: 0` is a placeholder (open water has no DST), so 1 July takes `rawOffset`.
+ */
 export function parseTimezone(body: Body): TimezoneInfo {
   const row = validate(body, 'rawOffset', TimezoneSchema, 'timezoneJSON');
+  const timezoneId = text(row.timezoneId);
   return prune<TimezoneInfo>({
-    timezoneId: text(row.timezoneId),
+    timezoneId,
     countryCode: text(row.countryCode),
     countryName: text(row.countryName),
     rawOffsetInHours: row.rawOffset,
     gmtOffsetInHours: row.gmtOffset,
-    dstOffsetInHours: row.dstOffset,
+    dstOffsetInHours:
+      timezoneId === undefined && row.dstOffset === 0 ? row.rawOffset : row.dstOffset,
     localTime: text(row.time),
     sunrise: text(row.sunrise),
     sunset: text(row.sunset),
@@ -394,7 +416,7 @@ export function parseCountries(body: Body): CountryInfo[] {
       countryCode: row.countryCode,
       countryName: row.countryName,
       isoAlpha3: row.isoAlpha3,
-      isoNumeric: codeText(row.isoNumeric),
+      isoNumeric: isoNumeric(row.isoNumeric),
       fipsCode: text(row.fipsCode),
       geonameId: row.geonameId,
       capital: text(row.capital),

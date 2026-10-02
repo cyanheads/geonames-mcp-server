@@ -6,12 +6,18 @@
  * @module tests/tools/search-places.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { searchPlacesTool } from '@/mcp-server/tools/definitions/search-places.tool.js';
 import { getFeatureCode } from '@/services/geonames/feature-codes.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
+import {
+  declaredError,
+  expectDeclaredError,
+  expectInOrder,
+} from '../fixtures/contract-assertions.js';
 import {
   CALLER_USERNAME,
   EMPTY_GEONAMES_BODY,
@@ -223,9 +229,11 @@ describe('input normalization', () => {
     expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['countries'] })]);
   });
 
-  it.each(['USA', 'U', 'U1', '12'])('rejects country code %j', async (code) => {
+  it.each(['U', 'U1', '12', 'USAA'])('rejects country code %j at the schema', async (code) => {
+    const fetchFake = serve();
     const error = errorOf(await run({ countries: code }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(fetchFake).not.toHaveBeenCalled();
   });
 
   it('normalizes feature classes and rejects an unknown one', async () => {
@@ -478,6 +486,111 @@ describe('input normalization', () => {
   });
 });
 
+describe('alpha-3 and numeric country codes', () => {
+  const countryParams = (fetchFake: ReturnType<typeof serve>) =>
+    sent(fetchFake).filter(([name]) => name === 'country');
+
+  const RECOVERY =
+    'Find the country with geonames_get_countries (nameContains matches its name), then call again with its alpha-2, alpha-3, or numeric code.';
+
+  it.each([['usa, DEU'], [['840', '276']], [['Usa', '276']], ['us,deu']])(
+    'sends %j as alpha-2 and echoes it in effectiveQuery',
+    async (countries) => {
+      const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+      const result = await run({ countries });
+      expect(countryParams(fetchFake)).toEqual([
+        ['country', 'US'],
+        ['country', 'DE'],
+      ]);
+      expect(successOf<Page>(result).effectiveQuery).toBe('countries US,DE');
+      expect(allText(result)).toContain('**effectiveQuery:** countries US,DE');
+    },
+  );
+
+  it('maps UK and GBR alike, and a leading-zero numeric code', async () => {
+    const fetchFake = serve();
+    await run({ countries: 'uk, GBR, 826, 010' });
+    expect(countryParams(fetchFake)).toEqual([
+      ['country', 'GB'],
+      ['country', 'GB'],
+      ['country', 'GB'],
+      ['country', 'AQ'],
+    ]);
+  });
+
+  it('names the mapped alpha-2 codes in the zero-hit notice', async () => {
+    serve(EMPTY_GEONAMES_BODY);
+    const result = await run({ query: 'Atlantis', countries: 'DEU' });
+    const page = successOf<Page>(result);
+    expect(page).toMatchObject({
+      places: [],
+      shown: 0,
+      effectiveQuery: 'name_required "Atlantis" · countries DE',
+    });
+    expectInOrder(page.notice, ['No GeoNames place matched', 'Only DE were searched']);
+    expect(allText(result)).toContain('Only DE were searched');
+  });
+
+  it.each([
+    ['ZZZ', ['ZZZ'], 'No country has the code ZZZ.'],
+    ['999', ['999'], 'No country has the code 999.'],
+    [['us', 'zzz', 'DEU', '999'], ['ZZZ', '999'], 'No country has the codes ZZZ, 999.'],
+  ])('fails %j as unknown_country_code before any request', async (countries, unknown, opening) => {
+    const fetchFake = serve();
+    const result = await run({ query: 'Berlin', countries });
+    const error = expectDeclaredError(searchPlacesTool, result, 'unknown_country_code');
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toMatchObject({ countries: unknown });
+    expect(error.message).toBe(
+      `${opening} countries takes ISO 3166-1 codes: alpha-2 (US, GB, DE), alpha-3 (USA), or three-digit numeric (840).`,
+    );
+    expect(allText(result)).toContain(`Error: ${error.message}`);
+    expect(allText(result)).toContain(`Recovery: ${RECOVERY}`);
+    expect(allText(result)).toContain('reason unknown_country_code');
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it('declares the recovery that points to geonames_get_countries', () => {
+    expect(declaredError(searchPlacesTool, 'unknown_country_code').recovery).toBe(RECOVERY);
+  });
+
+  it('checks country codes after the query checks and before every feature and box check', async () => {
+    const fetchFake = serve();
+    const reasonFor = async (input: Record<string, unknown>) =>
+      errorOf(await run({ countries: 'ZZZ', ...input })).data?.reason;
+    expect(await reasonFor({ match: 'exact_name' })).toBe('query_required');
+    expect(await reasonFor({ featureCodes: 'ZZZZ' })).toBe('unknown_country_code');
+    expect(await reasonFor({ featureClasses: 'H', featureCodes: 'MT' })).toBe(
+      'unknown_country_code',
+    );
+    expect(await reasonFor({ featureClasses: 'T', cities: 'cities1000' })).toBe(
+      'unknown_country_code',
+    );
+    expect(await reasonFor({ boundingBox: { north: 47, south: 48, east: -122, west: -123 } })).toBe(
+      'unknown_country_code',
+    );
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it('checks country codes before it resolves an account', async () => {
+    installService({}, { server: false });
+    expect(errorOf(await run({ countries: 'ZZZ' })).data?.reason).toBe('unknown_country_code');
+    expect(errorOf(await run({ countries: 'DEU' })).data?.reason).toBe('username_required');
+  });
+
+  it('advertises alpha-2, alpha-3, and numeric items in tools/list, and says so', () => {
+    const { countries } =
+      z.toJSONSchema(searchPlacesTool.input, { io: 'input', target: 'draft-2020-12' }).properties ??
+      {};
+    expect(countries).toMatchObject({ items: { pattern: '^([A-Z]{2,3}|\\d{3})$' } });
+    expectInOrder((countries as { description?: string }).description, [
+      'alpha-2',
+      'alpha-3',
+      'numeric',
+    ]);
+  });
+});
+
 describe('the upstream request', () => {
   const sendFor = async (input: unknown) => {
     const fetchFake = serve();
@@ -516,8 +629,8 @@ describe('the upstream request', () => {
       await sendFor({
         query: 'Springfield',
         countries: ['US', 'GB'],
-        featureClasses: ['P', 'A'],
-        featureCodes: ['PPLA2'],
+        featureClasses: ['P'],
+        featureCodes: ['PPLA2', 'PPLC'],
         cities: 'cities5000',
         boundingBox: { north: 48, south: 47, east: -122, west: -123 },
         orderBy: 'population',
@@ -530,8 +643,8 @@ describe('the upstream request', () => {
       ['country', 'US'],
       ['country', 'GB'],
       ['featureClass', 'P'],
-      ['featureClass', 'A'],
       ['featureCode', 'PPLA2'],
+      ['featureCode', 'PPLC'],
       ['cities', 'cities5000'],
       ['north', '48'],
       ['south', '47'],
@@ -555,6 +668,213 @@ describe('the upstream request', () => {
     const fetchFake = serve();
     await run({ query: 'x', geonamesUsername: CALLER_USERNAME });
     expect(requestedUrls(fetchFake)[0]?.searchParams.get('username')).toBe(CALLER_USERNAME);
+  });
+});
+
+describe('feature filters, which GeoNames intersects', () => {
+  /** Values of one repeated request param, in order. */
+  const valuesOf = (params: [string, string][], name: string) =>
+    params.filter(([param]) => param === name).map(([, value]) => value);
+
+  it.each([
+    [{ featureClasses: 'T', featureCodes: 'MT,PK' }, ['T'], ['MT', 'PK']],
+    [{ featureClasses: 't,h', featureCodes: 'MT,LK' }, ['T', 'H'], ['MT', 'LK']],
+  ])("sends %j, whose classes are exactly its codes' classes", async (filters, classes, codes) => {
+    const fetchFake = serve();
+    successOf<Page>(await run(filters));
+    expect(valuesOf(sent(fetchFake), 'featureClass')).toEqual(classes);
+    expect(valuesOf(sent(fetchFake), 'featureCode')).toEqual(codes);
+  });
+
+  it('sends all nine classes with one code of each', async () => {
+    const pairs = [
+      ['A', 'ADM1'],
+      ['H', 'LK'],
+      ['L', 'PRK'],
+      ['P', 'PPL'],
+      ['R', 'RD'],
+      ['S', 'AIRP'],
+      ['T', 'MT'],
+      ['U', 'SMU'],
+      ['V', 'FRST'],
+    ];
+    for (const [featureClass, code] of pairs) {
+      expect(getFeatureCode(code as string)?.featureClass, code).toBe(featureClass);
+    }
+    const fetchFake = serve();
+    successOf<Page>(
+      await run({
+        featureClasses: pairs.map(([featureClass]) => featureClass),
+        featureCodes: pairs.map(([, code]) => code),
+      }),
+    );
+    expect(valuesOf(sent(fetchFake), 'featureClass')).toHaveLength(9);
+    expect(valuesOf(sent(fetchFake), 'featureCode')).toHaveLength(9);
+  });
+
+  it.each([
+    [{ featureClasses: 'P', cities: 'cities1000' }],
+    [{ featureCodes: 'PPLC', cities: 'cities15000' }],
+    [{ featureClasses: 'P', featureCodes: 'PPLC,PPLA', cities: 'cities5000' }],
+  ])('sends cities beside class P or class-P codes: %j', async (filters) => {
+    const fetchFake = serve();
+    successOf<Page>(await run(filters));
+    expect(requestedUrls(fetchFake)[0]?.searchParams.get('cities')).toBe(filters.cities);
+  });
+
+  it('checks feature codes before the bounding box', async () => {
+    const fetchFake = serve();
+    const badBox = { north: 47, south: 48, east: -122, west: -123 };
+    const error = errorOf(await run({ featureCodes: 'ZZZZ', boundingBox: badBox }));
+    expect(error.data?.reason).toBe('unknown_feature_code');
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  const RAINIER_BOX = { north: 46.95, south: 46.75, east: -121.6, west: -121.9 };
+
+  /** The recovery sentence for each restriction; a throw carries only those its call breaks. */
+  const LISTS_HINT =
+    'Call geonames_search_places again with featureCodes alone (each code implies its class) or featureClasses alone; for a whole class plus codes of another class, make one call per class.';
+  const CITIES_HINT =
+    'cities keeps only class P: beside it, list only P or class-P codes such as PPLC, or drop cities.';
+
+  it('declares both recovery sentences', () => {
+    expect(declaredError(searchPlacesTool, 'feature_filter_mismatch').recovery).toBe(
+      `${LISTS_HINT} ${CITIES_HINT}`,
+    );
+  });
+
+  it.each([
+    [
+      { featureClasses: 'H', featureCodes: 'MT' },
+      { featureCodes: ['MT'], featureClasses: ['H'] },
+      ['MT is class T, outside featureClasses', 'class H has no code in featureCodes'],
+    ],
+    [
+      { featureClasses: 'T,H', featureCodes: 'MT' },
+      { featureCodes: [], featureClasses: ['H'] },
+      ['class H has no code in featureCodes'],
+    ],
+    [
+      { featureClasses: 'T', featureCodes: 'MT,LK' },
+      { featureCodes: ['LK'], featureClasses: [] },
+      ['LK is class H, outside featureClasses'],
+    ],
+  ])(
+    'fails %j with feature_filter_mismatch before any request',
+    async (filters, offending, stems) => {
+      const fetchFake = serve();
+      const result = await run({ ...filters, boundingBox: RAINIER_BOX });
+      const error = expectDeclaredError(
+        searchPlacesTool,
+        result,
+        'feature_filter_mismatch',
+        LISTS_HINT,
+      );
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject(offending);
+      expectInOrder(error.message, [
+        'GeoNames applies featureClasses and featureCodes together',
+        ...stems,
+      ]);
+      expect(allText(result)).toContain(`Error: ${error.message}`);
+      expect(allText(result)).toContain(`Recovery: ${LISTS_HINT}`);
+      expect(allText(result)).not.toContain('cities');
+      expect(allText(result)).toContain('reason feature_filter_mismatch');
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names each mismatched entry once, codes with their class', async () => {
+    serve();
+    const error = errorOf(await run({ featureClasses: 'H,H', featureCodes: 'MT,MT' }));
+    expect(error.message).toBe(
+      'GeoNames applies featureClasses and featureCodes together, so these entries can never match: MT is class T, outside featureClasses; class H has no code in featureCodes.',
+    );
+    expect(error.data).toMatchObject({ featureCodes: ['MT'], featureClasses: ['H'] });
+  });
+
+  it('checks the pair before it resolves an account', async () => {
+    installService({}, { server: false });
+    expect(errorOf(await run({ featureClasses: 'H', featureCodes: 'MT' })).data?.reason).toBe(
+      'feature_filter_mismatch',
+    );
+    expect(errorOf(await run({ featureClasses: 'T', featureCodes: 'MT' })).data?.reason).toBe(
+      'username_required',
+    );
+  });
+
+  it('checks the pair after unknown codes and before the bounding box', async () => {
+    const fetchFake = serve();
+    expect(errorOf(await run({ featureClasses: 'H', featureCodes: 'MT,ZZZZ' })).data?.reason).toBe(
+      'unknown_feature_code',
+    );
+    const badBox = { north: 47, south: 48, east: -122, west: -123 };
+    expect(
+      errorOf(await run({ featureClasses: 'H', featureCodes: 'MT', boundingBox: badBox })).data
+        ?.reason,
+    ).toBe('feature_filter_mismatch');
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      { featureClasses: 'T', cities: 'cities1000' },
+      { featureCodes: [], featureClasses: ['T'] },
+      'GeoNames applies featureClasses and cities together, so these entries can never match: class T is outside cities (class P only).',
+      CITIES_HINT,
+    ],
+    [
+      { featureClasses: 'P,T', cities: 'cities1000' },
+      { featureCodes: [], featureClasses: ['T'] },
+      'GeoNames applies featureClasses and cities together, so these entries can never match: class T is outside cities (class P only).',
+      CITIES_HINT,
+    ],
+    [
+      { featureCodes: 'MT', cities: 'cities1000' },
+      { featureCodes: ['MT'], featureClasses: [] },
+      'GeoNames applies featureCodes and cities together, so these entries can never match: MT is class T, outside cities (class P only).',
+      CITIES_HINT,
+    ],
+    [
+      { featureClasses: 'T', featureCodes: 'MT', cities: 'cities1000' },
+      { featureCodes: ['MT'], featureClasses: ['T'] },
+      'GeoNames applies featureClasses, featureCodes, and cities together, so these entries can never match: MT is class T, outside cities (class P only); class T is outside cities (class P only).',
+      CITIES_HINT,
+    ],
+    [
+      { featureClasses: 'P', featureCodes: 'MT', cities: 'cities15000' },
+      { featureCodes: ['MT'], featureClasses: ['P'] },
+      'GeoNames applies featureClasses, featureCodes, and cities together, so these entries can never match: MT is class T, outside featureClasses and cities (class P only); class P has no code in featureCodes.',
+      `${LISTS_HINT} ${CITIES_HINT}`,
+    ],
+  ])(
+    'fails %j with feature_filter_mismatch, naming cities as the class-P restriction',
+    async (filters, offending, message, hint) => {
+      const fetchFake = serve();
+      const result = await run({ ...filters, boundingBox: RAINIER_BOX });
+      const error = expectDeclaredError(searchPlacesTool, result, 'feature_filter_mismatch', hint);
+      expect(error.message).toBe(message);
+      expect(error.data).toMatchObject(offending);
+      expect(allText(result)).toContain(`Error: ${message}`);
+      expect(allText(result)).toContain(`Recovery: ${hint}`);
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('checks cities against the filter before it resolves an account', async () => {
+    installService({}, { server: false });
+    expect(errorOf(await run({ featureClasses: 'T', cities: 'cities1000' })).data?.reason).toBe(
+      'feature_filter_mismatch',
+    );
+  });
+
+  it('says the filters intersect, and that cities keeps only class P', () => {
+    const { featureClasses, featureCodes, cities } = searchPlacesTool.input.shape;
+    expect(featureClasses.description).toContain('intersect');
+    expect(featureCodes.description).toContain('intersect');
+    expect(featureCodes.description).toContain('Each code implies its class');
+    expect(cities.description).toContain('populated places (class P)');
   });
 });
 

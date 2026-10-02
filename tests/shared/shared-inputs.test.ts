@@ -1,7 +1,8 @@
 /**
- * @fileoverview Shared tool inputs: blank-as-unset, comma-list normalization, id and URL
- * reduction, bounds, the strict name matcher, local pagination, and the argument names
- * redacted from the failed-call payload record.
+ * @fileoverview Shared tool inputs: blank-as-unset, comma-list normalization, country codes
+ * mapped to alpha-2, id and URL reduction, bounds, the feature-filter intersection check,
+ * the strict name matcher, local pagination, and the argument names redacted from the
+ * failed-call payload record.
  * @module tests/shared/shared-inputs.test
  */
 
@@ -15,6 +16,7 @@ import {
   countriesInput,
   featureClassesInput,
   featureCodesInput,
+  featureFilterMismatch,
   geonameIdInput,
   geonamesUsernameInput,
   latInput,
@@ -27,6 +29,7 @@ import {
   paginate,
   USERNAME_ALIASES,
   USERNAME_LOG_FIELDS,
+  unknownCountryCodes,
 } from '@/mcp-server/tools/shared-inputs.js';
 
 /** `schema.safeParse` on a value, returning the parsed data or the issue paths. */
@@ -287,12 +290,71 @@ describe('countriesInput', () => {
     rejects(countriesInput, [...codes, 'AT']);
   });
 
-  it.each(['USA', 'U', '12', 'U S'])('rejects %j', (input) => {
+  it.each([
+    ['usa, DEU', ['US', 'DE']],
+    [
+      ['840', '276'],
+      ['US', 'DE'],
+    ],
+    ['gbr,826,uk,gb', ['GB', 'GB', 'GB', 'GB']],
+    ['010, ata, aq', ['AQ', 'AQ', 'AQ']],
+    ['xkx', ['XK']],
+  ])('maps alpha-3 and numeric codes to alpha-2 in %j', (input, expected) => {
+    expect(ok(countriesInput, input)).toEqual(expected);
+  });
+
+  it('keeps a well-formed code no country has as written, for the tool to reject', () => {
+    expect(ok(countriesInput, 'zzz, 999, 000, xx')).toEqual(['ZZZ', '999', '000', 'XX']);
+  });
+
+  it.each(['U', 'U1', '12', 'USAA', '1234', '84', 'U S', 'US-A'])('rejects %j', (input) => {
     rejects(countriesInput, input);
+  });
+
+  it('advertises alpha-2, alpha-3, and numeric items in its JSON Schema and description', () => {
+    const { countries } =
+      z.toJSONSchema(z.object({ countries: countriesInput }), {
+        io: 'input',
+        target: 'draft-2020-12',
+      }).properties ?? {};
+    expect(countries).toMatchObject({
+      items: { pattern: '^([A-Z]{2,3}|\\d{3})$' },
+      description: expect.stringMatching(/alpha-2.*alpha-3.*numeric/),
+    });
   });
 
   it.each(['', ',', [], undefined])('reads %j as unset', (input) => {
     expect(ok(countriesInput, input)).toBeUndefined();
+  });
+});
+
+describe('unknownCountryCodes', () => {
+  const FORMS =
+    'countries takes ISO 3166-1 codes: alpha-2 (US, GB, DE), alpha-3 (USA), or three-digit numeric (840).';
+
+  it('names the alpha-3 and numeric entries the table could not map, in input order', () => {
+    const countries = ok(countriesInput, 'us, zzz, DEU, 999, xx') as string[];
+    expect(unknownCountryCodes(countries)).toEqual({
+      countries: ['ZZZ', '999'],
+      message: `No country has the codes ZZZ, 999. ${FORMS}`,
+    });
+  });
+
+  it('uses the singular for one code', () => {
+    expect(unknownCountryCodes(['000'])?.message).toBe(`No country has the code 000. ${FORMS}`);
+  });
+
+  it('names a repeated unknown code once', () => {
+    const countries = ok(countriesInput, 'ZZZ, 999, zzz') as string[];
+    expect(unknownCountryCodes(countries)).toEqual({
+      countries: ['ZZZ', '999'],
+      message: `No country has the codes ZZZ, 999. ${FORMS}`,
+    });
+  });
+
+  it('finds nothing in alpha-2 codes, known or not, or an unset filter', () => {
+    expect(unknownCountryCodes(['US', 'XX', 'GB'])).toBeUndefined();
+    expect(unknownCountryCodes(undefined)).toBeUndefined();
   });
 });
 
@@ -355,6 +417,57 @@ describe('citiesInput', () => {
 
   it.each(['cities500', 'all'])('rejects %j', (value) => {
     rejects(citiesInput, value);
+  });
+});
+
+describe('featureFilterMismatch', () => {
+  type Filters = Parameters<typeof featureFilterMismatch>[0];
+  const none = { featureClasses: undefined, featureCodes: undefined };
+
+  it.each<[string, Filters]>([
+    ['no filter', none],
+    ['classes alone', { ...none, featureClasses: ['T', 'H'] }],
+    ['codes alone, across classes', { ...none, featureCodes: ['MT', 'LK', 'PPLC'] }],
+    ['cities alone', { ...none, cities: 'cities1000' }],
+    [
+      'each class with a code of its own',
+      { featureClasses: ['T', 'H'], featureCodes: ['MT', 'PK', 'LK'] },
+    ],
+    [
+      'cities beside class P and its codes',
+      { featureClasses: ['P'], featureCodes: ['PPLC', 'PPLA'], cities: 'cities5000' },
+    ],
+  ])('finds nothing for %s', (_label, filters) => {
+    expect(featureFilterMismatch(filters)).toBeUndefined();
+  });
+
+  it('lists codes before classes, each once, in input order', () => {
+    expect(
+      featureFilterMismatch({
+        featureClasses: ['V', 'H', 'V'],
+        featureCodes: ['MT', 'AIRP', 'MT', 'LK'],
+      }),
+    ).toEqual({
+      featureCodes: ['MT', 'AIRP'],
+      featureClasses: ['V'],
+      message:
+        'GeoNames applies featureClasses and featureCodes together, so these entries can never match: MT is class T, outside featureClasses; AIRP is class S, outside featureClasses; class V has no code in featureCodes.',
+    });
+  });
+
+  it('names both restrictions an entry breaks in one clause', () => {
+    expect(
+      featureFilterMismatch({ featureClasses: ['T'], featureCodes: ['LK'], cities: 'cities1000' })
+        ?.message,
+    ).toBe(
+      'GeoNames applies featureClasses, featureCodes, and cities together, so these entries can never match: LK is class H, outside featureClasses and cities (class P only); class T has no code in featureCodes and is outside cities (class P only).',
+    );
+  });
+
+  it('skips a code the bundled table does not know', () => {
+    expect(
+      featureFilterMismatch({ featureClasses: ['T'], featureCodes: ['MT', 'ZZZZ'] }),
+    ).toBeUndefined();
   });
 });
 

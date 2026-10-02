@@ -106,7 +106,12 @@ export interface ChildrenResult {
 /** `countrySubdivisionJSON` containment for a point. */
 export interface Subdivision {
   adminLevels: AdminLevel[];
-  country?: { countryCode: string; countryName?: string };
+  country?: {
+    countryCode: string;
+    countryName?: string;
+    /** Km from the point to the country, to the metre; only for a match within the `radius` buffer. */
+    distanceInKm?: number;
+  };
 }
 
 /** `oceanJSON` result. */
@@ -119,7 +124,10 @@ export interface Ocean {
 export interface TimezoneInfo {
   countryCode?: string;
   countryName?: string;
-  /** UTC offset in hours on 1 July (GeoNames' `dstOffset`). */
+  /**
+   * UTC offset in hours on 1 July (GeoNames' `dstOffset`). With no `timezoneId`, GeoNames'
+   * `dstOffset: 0` is a placeholder and the standard offset stands in: open water has no DST.
+   */
   dstOffsetInHours: number;
   /** UTC offset in hours on 1 January (GeoNames' `gmtOffset`). */
   gmtOffsetInHours: number;
@@ -207,8 +215,11 @@ export interface SearchResult {
   totalCount: number;
 }
 
-/** Child trees `childrenJSON` serves. */
-export type ChildHierarchy = 'administrative' | 'dependency' | 'geography' | 'tourism';
+/**
+ * Child trees `childrenJSON` serves. GeoNames also documents `geography`, but its hierarchy
+ * dump holds no such edge, and a request for it answers with the administrative children.
+ */
+export type ChildHierarchy = 'administrative' | 'dependency' | 'tourism';
 
 /** Shared parameters of the two nearby endpoints. */
 export interface NearbyParams {

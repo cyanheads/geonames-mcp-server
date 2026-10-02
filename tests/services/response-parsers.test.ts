@@ -20,12 +20,21 @@ import {
 } from '@/services/geonames/response-parsers.js';
 import {
   COUNTRY_INFO_BODY,
+  COUNTRY_KOSOVO_ROW,
   GET_SEATTLE_BODY,
   SEARCH_BODY,
   SEATTLE_ROW,
   SUBDIVISION_PARIS_BODY,
+  TIMEZONE_ACCRA_BODY,
+  TIMEZONE_OFFSHORE_BODY,
+  TIMEZONE_OPEN_PACIFIC_BODY,
   TIMEZONE_PARIS_BODY,
+  TIMEZONE_REYKJAVIK_BODY,
 } from '../fixtures/geonames-upstream.js';
+import {
+  SUBDIVISION_HUDSON_BUFFERED_BODY,
+  SUBDIVISION_KEHL_BODY,
+} from '../fixtures/geonames-upstream-spatial.js';
 
 /** The reason an McpError thrown by `run` carries. */
 function reasonOfThrow(run: () => unknown): { code: JsonRpcErrorCode; reason: unknown } {
@@ -198,6 +207,14 @@ describe('parsePlace', () => {
     expect(parsePlace({ ...base, timezone: { timeZoneId: '' } })).not.toHaveProperty('timezone');
   });
 
+  it("keeps a place timezone's 1 July offset as sent, even with no zone id and a 0 offset", () => {
+    const base = { geonameId: 1, name: 'n', toponymName: 'n' };
+    expect(parsePlace({ ...base, timezone: { gmtOffset: -10, dstOffset: 0 } }).timezone).toEqual({
+      gmtOffsetInHours: -10,
+      dstOffsetInHours: 0,
+    });
+  });
+
   it('omits a bounding box with a missing side', () => {
     const base = { geonameId: 1, name: 'n', toponymName: 'n' };
     expect(parsePlace({ ...base, bbox: { north: 1, south: 0, east: 1 } })).not.toHaveProperty(
@@ -314,6 +331,41 @@ describe('parseSubdivision', () => {
   it('omits the country when the code is blank', () => {
     expect(parseSubdivision({ countryCode: '' }).country).toBeUndefined();
   });
+
+  it('gives a contained point (distance 0) no country distance', () => {
+    expect(parseSubdivision(SUBDIVISION_KEHL_BODY).country).toEqual({
+      countryCode: 'DE',
+      countryName: 'Germany',
+    });
+    expect(parseSubdivision(SUBDIVISION_PARIS_BODY).country).not.toHaveProperty('distanceInKm');
+  });
+
+  it("reads a buffered match's distance onto the country, to the metre", () => {
+    expect(parseSubdivision(SUBDIVISION_HUDSON_BUFFERED_BODY)).toEqual({
+      country: { countryCode: 'US', countryName: 'United States', distanceInKm: 0.134 },
+      adminLevels: [
+        { level: 1, code: 'NJ', name: 'New Jersey', geonameId: 5101760, isoCode: 'NJ' },
+        { level: 2, code: '017', name: 'Hudson', geonameId: 5099357 },
+      ],
+    });
+  });
+
+  it.each([
+    ['0.048', 0.048],
+    [2.0004, 2],
+    [12.3456, 12.346],
+  ])('parses the distance %j as %j km', (distance, expected) => {
+    expect(parseSubdivision({ countryCode: 'FR', distance }).country?.distanceInKm).toBe(expected);
+  });
+
+  it.each([0, '0', -1, '', 'far', null, 0.0004])(
+    'leaves out a distance of %j, which is no buffered match',
+    (distance) => {
+      expect(parseSubdivision({ countryCode: 'FR', distance }).country).toEqual({
+        countryCode: 'FR',
+      });
+    },
+  );
 });
 
 describe('parseOcean', () => {
@@ -349,6 +401,46 @@ describe('parseTimezone', () => {
       time: ' ',
     });
     expect(result).toEqual({ rawOffsetInHours: 0, gmtOffsetInHours: 0, dstOffsetInHours: 0 });
+  });
+
+  it.each([
+    ['Atlantic/Reykjavik', TIMEZONE_REYKJAVIK_BODY],
+    ['Africa/Accra', TIMEZONE_ACCRA_BODY],
+  ])('keeps the real 0 offsets of %s, a land zone at UTC+0', (timezoneId, body) => {
+    expect(parseTimezone(body)).toMatchObject({
+      timezoneId,
+      rawOffsetInHours: 0,
+      gmtOffsetInHours: 0,
+      dstOffsetInHours: 0,
+    });
+  });
+
+  it('keeps a 1 July offset of 0 when a zone id comes with it, whatever the standard offset', () => {
+    expect(
+      parseTimezone({ timezoneId: 'Etc/Test', rawOffset: -1, gmtOffset: -1, dstOffset: 0 }),
+    ).toMatchObject({ rawOffsetInHours: -1, dstOffsetInHours: 0 });
+  });
+
+  it('keeps a nonzero 1 July offset as sent when no zone id comes with it', () => {
+    expect(parseTimezone({ rawOffset: -3, gmtOffset: -3, dstOffset: -2 })).toEqual({
+      rawOffsetInHours: -3,
+      gmtOffsetInHours: -3,
+      dstOffsetInHours: -2,
+    });
+  });
+
+  it('reports the standard offset for 1 July offshore, where GeoNames sends the dstOffset 0 placeholder', () => {
+    expect(parseTimezone(TIMEZONE_OPEN_PACIFIC_BODY)).toEqual({
+      rawOffsetInHours: -10,
+      gmtOffsetInHours: -10,
+      dstOffsetInHours: -10,
+    });
+    expect(parseTimezone(TIMEZONE_OFFSHORE_BODY).dstOffsetInHours).toBe(-3);
+  });
+
+  it.each(['', '  '])('reads a blank timezoneId (%j) as absent', (timezoneId) => {
+    const result = parseTimezone({ timezoneId, rawOffset: 7, gmtOffset: 7, dstOffset: 0 });
+    expect(result).toEqual({ rawOffsetInHours: 7, gmtOffsetInHours: 7, dstOffsetInHours: 7 });
   });
 });
 
@@ -430,6 +522,21 @@ describe('parseCountries', () => {
     const [country] = parseCountries(COUNTRY_INFO_BODY).slice(1);
     expect(country?.languages).toEqual([]);
   });
+
+  it('keeps a real numeric code as received, a leading zero included', () => {
+    const [us, aq] = parseCountries(COUNTRY_INFO_BODY);
+    expect(us?.isoNumeric).toBe('840');
+    expect(aq?.isoNumeric).toBe('010');
+  });
+
+  it.each([['0'], [0], ['000']])(
+    "drops Kosovo's numeric placeholder %j: ISO assigns it no numeric code",
+    (isoNumeric) => {
+      const [kosovo] = parseCountries({ geonames: [{ ...COUNTRY_KOSOVO_ROW, isoNumeric }] });
+      expect(kosovo).toMatchObject({ countryCode: 'XK', isoAlpha3: 'XKX', fipsCode: 'KV' });
+      expect(kosovo).not.toHaveProperty('isoNumeric');
+    },
+  );
 });
 
 describe('parsePostalCountries', () => {

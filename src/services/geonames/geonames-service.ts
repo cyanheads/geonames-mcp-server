@@ -345,22 +345,28 @@ export class GeoNamesService {
 
   /**
    * `countrySubdivisionJSON?level=5` (1 credit, cached 24 h). `undefined` when no country
-   * contains the point (status 15) — a result, cached like any other.
+   * contains the point (status 15) — a result, cached like any other. A `bufferKm` above 0
+   * is sent as `radius`, matching the nearest country within it; at 0 no `radius` is sent,
+   * so the request and its cache key are the unbuffered ones. `maxRows` is never sent:
+   * beside `radius` it switches the response to a list of subdivisions.
    */
   subdivision(
     lat: number,
     lng: number,
     account: GeoNamesAccount,
     ctx: Context,
+    options: { bufferKm?: number } = {},
   ): Promise<Subdivision | undefined> {
+    const params: [string, string][] = [
+      ['lat', String(lat)],
+      ['lng', String(lng)],
+      ['level', '5'],
+    ];
+    if (options.bufferKm) params.push(['radius', String(options.bufferKm)]);
     return this.#call<Subdivision | undefined>(
       {
         endpoint: 'countrySubdivisionJSON',
-        params: [
-          ['lat', String(lat)],
-          ['lng', String(lng)],
-          ['level', '5'],
-        ],
+        params,
         ttlMs: DAY_MS,
         parse: (payload) => bodyOr(payload, undefined, parseSubdivision),
       },

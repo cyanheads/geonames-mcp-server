@@ -14,6 +14,7 @@ import {
   citiesInput,
   featureClassesInput,
   featureCodesInput,
+  featureFilterMismatch,
   geonamesUsernameInput,
   latInput,
   lngInput,
@@ -35,6 +36,12 @@ const MAX_NEARBY = 50;
 
 /** GeoNames' free-tier ceiling on the nearby radius (status 24 beyond). */
 const MAX_RADIUS_KM = 300;
+
+/**
+ * Ceiling on the containment buffer: room for harbors, estuaries, and the 12-nautical-mile
+ * territorial sea, and well below the 300 km GeoNames rejects with status 24.
+ */
+const MAX_COASTAL_BUFFER_KM = 50;
 
 const NEARBY_KINDS = ['populated_places', 'features', 'none'] as const;
 
@@ -65,7 +72,7 @@ const orNotAvailable = (value: string | number | undefined): string =>
 export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
   title: 'Reverse geocode with GeoNames',
   description:
-    "Resolve a latitude/longitude to the country and admin subdivisions that contain it (down to ADM5, each with its geonameId and ISO 3166-2 code where one exists), or the ocean or sea when the point is offshore, plus the nearest populated places with distances; these include neighborhood sections (PPLX) and historical places (PPLH), marked by featureCode. Set featureClasses or featureCodes to list the nearest features of that type instead (peaks, lakes, airports), cities to keep only places above a population tier, and includeTimezone for the IANA timezone with local time, sunrise, and sunset (offshore points get only GeoNames' UTC-offset estimate). Costs 1 GeoNames credit for containment, plus 3 for nearest populated places or 4 for nearest features (nearbyLimit 0 skips them), 1 for the ocean when no country contains the point, and 1 for the timezone.",
+    "Resolve a latitude/longitude to the country and admin subdivisions that contain it (down to ADM5, each with its geonameId and ISO 3166-2 code where one exists), or the ocean or sea when the point is offshore, plus the nearest populated places with distances; these include neighborhood sections (PPLX) and historical places (PPLH), marked by featureCode. Set featureClasses or featureCodes to list the nearest features of that type instead (peaks, lakes, airports), cities to keep only places above a population tier, and includeTimezone for the IANA timezone with local time, sunrise, and sunset (offshore points get only GeoNames' UTC-offset estimate). A harbor, pier, or shoreline point can fall just outside every country outline and resolve to the sea; coastalBufferKm (up to 50) matches the nearest country within that distance instead. Costs 1 GeoNames credit for containment, with or without the buffer, plus 3 for nearest populated places or 4 for nearest features (nearbyLimit 0 skips them), 1 for the ocean when no country contains the point or lies within the buffer, and 1 for the timezone.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     lat: latInput,
@@ -80,13 +87,16 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       "Keep only nearby populated places with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. Not combinable with featureClasses or featureCodes.",
     ),
     featureClasses: featureClassesInput.describe(
-      'List the nearest features of these GeoNames classes instead of populated places: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. A list or a comma-separated string; case-insensitive. Not combinable with cities.',
+      'List the nearest features of these GeoNames classes instead of populated places: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. A list or a comma-separated string; case-insensitive. With featureCodes too, the two lists intersect: list exactly the classes of those codes, or pass featureCodes alone. Not combinable with cities.',
     ),
     featureCodes: featureCodesInput.describe(
-      'List the nearest features with these GeoNames codes instead of populated places (MT mountain, PK peak, LK lake, AIRP airport), up to 20, as a list or a comma-separated string. Case-insensitive; a class prefix (T.MT) is dropped. geonames_list_reference topic feature_codes lists every code. Not combinable with cities.',
+      "List the nearest features with these GeoNames codes instead of populated places (MT mountain, PK peak, LK lake, AIRP airport), up to 20, as a list or a comma-separated string. Case-insensitive; a class prefix (T.MT) is dropped. Each code implies its class; with featureClasses too, the two lists intersect, so featureClasses must list exactly these codes' classes. geonames_list_reference topic feature_codes lists every code. Not combinable with cities.",
     ),
     includeTimezone: blankAsUnset(z.boolean().default(false)).describe(
       'Also return the timezone: IANA id, UTC offsets, local time, sunrise, and sunset (1 more credit). Default false.',
+    ),
+    coastalBufferKm: blankAsUnset(z.number().min(0).max(MAX_COASTAL_BUFFER_KM).default(0)).describe(
+      "When no country contains the point, match the nearest country within this many kilometres, 0 to 50. Default 0: exact containment only. Set it for a harbor, pier, or shoreline point, which can fall just outside a country's outline as GeoNames maps it and otherwise resolves to the sea; a match carries country.distanceInKm. The nearby and timezone lookups keep the exact point. No extra credit.",
     ),
     geonamesUsername: geonamesUsernameInput,
   }),
@@ -101,9 +111,17 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
           .string()
           .optional()
           .describe('Country name. Absent when GeoNames sent none.'),
+        distanceInKm: z
+          .number()
+          .optional()
+          .describe(
+            'Kilometres from the point to this country as GeoNames maps it, to the metre. Present only when no country contains the point and this one was matched within coastalBufferKm.',
+          ),
       })
       .optional()
-      .describe('The country containing the point; absent offshore and in unmapped areas.'),
+      .describe(
+        'The country containing the point, or with coastalBufferKm the nearest country within that distance (then distanceInKm is set); absent offshore and in unmapped areas.',
+      ),
     adminLevels: z
       .array(
         z
@@ -122,10 +140,12 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
                 'ISO 3166-2 code of the division, subdivision part only (IDF, not FR-IDF), where one exists.',
               ),
           })
-          .describe('One admin division containing the point.'),
+          .describe(
+            'One admin division containing the point, or for a country matched within coastalBufferKm, the one nearest it.',
+          ),
       )
       .describe(
-        'Admin divisions containing the point, first level first; empty offshore, and where GeoNames records no subdivision of the country.',
+        'Admin divisions containing the point, first level first; for a country matched within coastalBufferKm, the divisions of its part nearest the point. Empty offshore, and where GeoNames records no subdivision of the country.',
       ),
     ocean: z
       .object({
@@ -136,7 +156,9 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
           .describe('GeoNames feature id of the water body. Absent when GeoNames has none.'),
       })
       .optional()
-      .describe('The ocean or sea at the point; present only when no country contains it.'),
+      .describe(
+        'The ocean or sea at the point; present only when no country contains it or lies within coastalBufferKm.',
+      ),
     nearbyKind: z
       .enum(NEARBY_KINDS)
       .describe(
@@ -208,7 +230,11 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
           .describe('ISO 3166-1 alpha-2 code of the timezone country. Absent offshore.'),
         rawOffsetInHours: z.number().describe('Standard UTC offset in hours, without DST.'),
         gmtOffsetInHours: z.number().describe('UTC offset in hours on 1 January.'),
-        dstOffsetInHours: z.number().describe('UTC offset in hours on 1 July.'),
+        dstOffsetInHours: z
+          .number()
+          .describe(
+            "UTC offset in hours on 1 July. Without a timezoneId the offsets are GeoNames' open-water estimate, which has no DST, so this equals rawOffsetInHours.",
+          ),
         localTime: z
           .string()
           .optional()
@@ -235,7 +261,7 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       .string()
       .optional()
       .describe(
-        'Guidance when the point is offshore or unmapped, nothing is nearby, nearby is full, or no IANA timezone covers it.',
+        'Guidance when the point is offshore or unmapped, its country was matched within coastalBufferKm, nothing is nearby, nearby is full, or no IANA timezone covers it.',
       ),
   },
   errors: [
@@ -253,6 +279,14 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       when: 'cities was combined with featureClasses or featureCodes.',
       recovery:
         'Call geonames_reverse_geocode again with cities for the nearest populated places, or featureClasses/featureCodes for the nearest features of a type, not both.',
+      severity: 'notice',
+    },
+    {
+      reason: 'feature_filter_mismatch',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "featureClasses and featureCodes are both set and a code's class is not listed or a listed class has no listed code. GeoNames intersects the two lists, so those entries match nothing.",
+      recovery:
+        'Call geonames_reverse_geocode again with featureCodes alone (each code implies its class) or featureClasses alone; for a whole class plus codes of another class, make one call per class.',
       severity: 'notice',
     },
     {
@@ -304,7 +338,16 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
   async handler(input, ctx) {
     const startedAt = Date.now();
     ctx.enrich({ truncated: false, shown: 0, cap: input.nearbyLimit });
-    const { lat, lng, nearbyLimit, radiusKm, cities, featureClasses, featureCodes } = input;
+    const {
+      lat,
+      lng,
+      nearbyLimit,
+      radiusKm,
+      cities,
+      featureClasses,
+      featureCodes,
+      coastalBufferKm,
+    } = input;
     if (cities !== undefined && (featureClasses !== undefined || featureCodes !== undefined)) {
       throw ctx.fail(
         'conflicting_filters',
@@ -319,6 +362,11 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
         { featureCodes: unknownCodes },
       );
     }
+    const mismatch = featureFilterMismatch({ featureClasses, featureCodes });
+    if (mismatch !== undefined) {
+      const { message, ...offending } = mismatch;
+      throw ctx.fail('feature_filter_mismatch', message, offending);
+    }
 
     const service = getGeoNamesService();
     const account = service.resolveAccount(input.geonamesUsername);
@@ -329,9 +377,11 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
           ? 'features'
           : 'populated_places';
 
-    /** Containment, then the ocean only when no country contains the point. */
+    /** Containment, then the ocean only when no country contains the point or lies within the buffer. */
     const locate = async (): Promise<{ subdivision?: Subdivision; ocean?: Ocean }> => {
-      const subdivision = await service.subdivision(lat, lng, account, ctx);
+      const subdivision = await service.subdivision(lat, lng, account, ctx, {
+        bufferKm: coastalBufferKm,
+      });
       if (subdivision !== undefined) return { subdivision };
       const remainingMs = TOOL_BUDGET_MS - (Date.now() - startedAt);
       const ocean = await service.ocean(lat, lng, account, ctx, {
@@ -359,11 +409,33 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
     const shown = nearby.length;
     ctx.enrich({ shown });
     const fragments: string[] = [];
-    if (subdivision === undefined) {
+    if (subdivision === undefined && ocean !== undefined) {
       fragments.push(
-        ocean === undefined
-          ? 'GeoNames has no country or ocean for this point (polar or unmapped area); geonames_search_places with a boundingBox around it can still find named features.'
-          : `No country contains this point; it lies in ${inlineText(ocean.name)}. Coastal points just offshore resolve to the water body.`,
+        coastalBufferKm > 0
+          ? `No country lies within ${coastalBufferKm} km of this point; it lies in ${inlineText(ocean.name)}.`
+          : `No country contains this point; it lies in ${inlineText(ocean.name)}. A harbor or shoreline point just outside a country's outline resolves to the water body: set coastalBufferKm (up to ${MAX_COASTAL_BUFFER_KM}) to match the nearest country within that distance.`,
+      );
+    } else if (subdivision === undefined) {
+      const noCountry =
+        coastalBufferKm > 0
+          ? `GeoNames has no country within ${coastalBufferKm} km of this point and no ocean for it`
+          : 'GeoNames has no country or ocean for this point';
+      fragments.push(
+        `${noCountry} (polar or unmapped area); geonames_search_places with a boundingBox around it can still find named features.`,
+      );
+      if (coastalBufferKm === 0) {
+        fragments.push(
+          `A shoreline point just outside a country's outline can land here too: set coastalBufferKm (up to ${MAX_COASTAL_BUFFER_KM}) to match the nearest country within that distance.`,
+        );
+      }
+    } else if (subdivision.country?.distanceInKm !== undefined) {
+      const { countryCode, countryName, distanceInKm } = subdivision.country;
+      const label =
+        countryName === undefined
+          ? inlineText(countryCode)
+          : `${inlineText(countryName)} (${inlineText(countryCode)})`;
+      fragments.push(
+        `No country contains this point exactly; ${label} was matched ${distanceInKm} km away, within the ${coastalBufferKm} km coastal buffer.`,
       );
     }
     const widen =
@@ -376,12 +448,11 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       );
     }
     if (nearbyKind === 'features' && shown === 0) {
-      const filter = [
-        featureCodes && `with code ${featureCodes.join(', ')}`,
-        featureClasses && `of class ${featureClasses.join(', ')}`,
-      ]
-        .filter(Boolean)
-        .join(' or ');
+      // Past feature_filter_mismatch, any listed classes are the codes' own: the codes are the filter.
+      const filter =
+        featureCodes === undefined
+          ? `of class ${featureClasses?.join(', ')}`
+          : `with code ${featureCodes.join(', ')}`;
       fragments.push(
         `No feature ${filter} within ${radiusKm} km; ${widen} or widen the feature filter (geonames_list_reference topic feature_codes).`,
       );
@@ -422,7 +493,7 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       `**Country:** ${
         country === undefined
           ? 'None'
-          : `${country.countryName === undefined ? '' : `${inlineText(country.countryName)} `}(${inlineText(country.countryCode)})`
+          : `${country.countryName === undefined ? '' : `${inlineText(country.countryName)} `}(${inlineText(country.countryCode)})${country.distanceInKm === undefined ? '' : `, ${country.distanceInKm} km away (matched within the coastal buffer)`}`
       }`,
     );
     if (ocean !== undefined) {

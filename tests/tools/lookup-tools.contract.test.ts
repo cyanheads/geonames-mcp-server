@@ -80,7 +80,9 @@ const CASES: ToolCase[] = [
     ownReasons: [
       'query_or_filter_required',
       'query_required',
+      'unknown_country_code',
       'unknown_feature_code',
+      'feature_filter_mismatch',
       'invalid_bounding_box',
     ],
     call: (input, options) =>

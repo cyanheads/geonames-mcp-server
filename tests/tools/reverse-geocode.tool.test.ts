@@ -30,14 +30,19 @@ import {
   SERVER_USERNAME,
   SUBDIVISION_PARIS_BODY,
   statusEnvelope,
+  TIMEZONE_ACCRA_BODY,
   TIMEZONE_OFFSHORE_BODY,
+  TIMEZONE_OPEN_PACIFIC_BODY,
   TIMEZONE_PARIS_BODY,
+  TIMEZONE_REYKJAVIK_BODY,
   textResponse,
 } from '../fixtures/geonames-upstream.js';
 import {
   NEARBY_PEAKS_BODY,
   NEARBY_TOKYO_BODY,
   nearbyPlacesBody,
+  SUBDIVISION_HUDSON_BUFFERED_BODY,
+  SUBDIVISION_KEHL_BODY,
   SUBDIVISION_SEATTLE_BODY,
 } from '../fixtures/geonames-upstream-spatial.js';
 import {
@@ -82,7 +87,7 @@ interface Page {
     name?: string;
   }[];
   cap: number;
-  country?: { countryCode: string; countryName?: string };
+  country?: { countryCode: string; countryName?: string; distanceInKm?: number };
   lat: number;
   lng: number;
   nearby: Nearby[];
@@ -409,7 +414,7 @@ describe('the upstream sequence', () => {
       await run({
         ...PARIS,
         featureClasses: 't,h',
-        featureCodes: 'MT,PK',
+        featureCodes: 'MT,PK,LK',
         radiusKm: 8,
         nearbyLimit: 7,
       }),
@@ -425,6 +430,7 @@ describe('the upstream sequence', () => {
       ['featureClass', 'H'],
       ['featureCode', 'MT'],
       ['featureCode', 'PK'],
+      ['featureCode', 'LK'],
     ]);
   });
 
@@ -668,14 +674,55 @@ describe('rows', () => {
     });
   });
 
-  it('maps an offshore timezone to the three offsets alone', async () => {
+  it('maps an offshore timezone to the three offsets alone, 1 July at the standard offset', async () => {
     serveOffshore();
     const result = page(await run({ ...SEA, includeTimezone: true, nearbyLimit: 0 }));
     expect(result.timezone).toEqual({
       rawOffsetInHours: -3,
       gmtOffsetInHours: -3,
-      dstOffsetInHours: 0,
+      dstOffsetInHours: -3,
     });
+  });
+
+  it('reports UTC-10 for 1 July in the open Pacific, on both surfaces', async () => {
+    serveOffshore({ timezone: () => jsonResponse(TIMEZONE_OPEN_PACIFIC_BODY) });
+    const result = await run({ lat: 0, lng: -150, includeTimezone: true, nearbyLimit: 0 });
+    expect(page(result).timezone).toEqual({
+      rawOffsetInHours: -10,
+      gmtOffsetInHours: -10,
+      dstOffsetInHours: -10,
+    });
+    expect(textOf(result)).toContain(
+      '- **UTC offsets (hours):** standard -10, 1 January -10, 1 July -10',
+    );
+  });
+
+  it.each([
+    ['Atlantic/Reykjavik', { lat: 64.1355, lng: -21.8954 }, TIMEZONE_REYKJAVIK_BODY],
+    ['Africa/Accra', { lat: 5.556, lng: -0.1969 }, TIMEZONE_ACCRA_BODY],
+  ])(
+    'keeps the 0 offsets of %s, a land zone at UTC+0, on both surfaces',
+    async (timezoneId, point, body) => {
+      serve({ timezone: () => jsonResponse(body) });
+      const result = await run({ ...point, includeTimezone: true, nearbyLimit: 0 });
+      expect(page(result).timezone).toMatchObject({
+        timezoneId,
+        rawOffsetInHours: 0,
+        gmtOffsetInHours: 0,
+        dstOffsetInHours: 0,
+      });
+      expect(textOf(result)).toContain(
+        '- **UTC offsets (hours):** standard 0, 1 January 0, 1 July 0',
+      );
+    },
+  );
+
+  it('describes the 1 July offset as the standard offset when no timezoneId comes with it', () => {
+    const timezone = reverseGeocodeTool.output.shape.timezone.unwrap().shape;
+    expect(timezone.dstOffsetInHours.description).toBe(
+      "UTC offset in hours on 1 July. Without a timezoneId the offsets are GeoNames' open-water estimate, which has no DST, so this equals rawOffsetInHours.",
+    );
+    expect(timezone.gmtOffsetInHours.description).toBe('UTC offset in hours on 1 January.');
   });
 });
 
@@ -735,10 +782,8 @@ describe('notices', () => {
     [{ featureCodes: 'MT' }, 'No feature with code MT within 20 km'],
     [{ featureCodes: 'mt, pk' }, 'No feature with code MT, PK within 20 km'],
     [{ featureClasses: 't,h' }, 'No feature of class T, H within 20 km'],
-    [
-      { featureCodes: 'MT', featureClasses: 'T' },
-      'No feature with code MT or of class T within 20 km',
-    ],
+    [{ featureCodes: 'MT', featureClasses: 'T' }, 'No feature with code MT within 20 km'],
+    [{ featureCodes: 'MT,PK', featureClasses: 'T' }, 'No feature with code MT, PK within 20 km'],
   ])('names the feature filter %j when nothing of that type is near', async (filter, lead) => {
     serve({ features: () => jsonResponse(EMPTY_GEONAMES_BODY) });
     const result = page(await run({ ...PARIS, ...filter }));
@@ -749,6 +794,7 @@ describe('notices', () => {
       'feature filter',
       'geonames_list_reference',
     ]);
+    expect(result.notice).not.toContain(' or of class');
   });
 
   it('warns when nearby is full at nearbyLimit, with the contract wording', async () => {
@@ -866,6 +912,214 @@ describe('notices', () => {
   });
 });
 
+describe('coastal buffer', () => {
+  /** Upper New York Bay, 134 m outside the nearest country outline GeoNames holds. */
+  const HARBOR = { lat: 40.69, lng: -74.03 } as const;
+
+  /** Containment that matches only with a radius, as GeoNames answers the harbor point. */
+  const harbor = (routes: Routes = {}) =>
+    serve({
+      subdivision: (url) =>
+        url.searchParams.has('radius')
+          ? jsonResponse(SUBDIVISION_HUDSON_BUFFERED_BODY)
+          : noContainment(),
+      ...routes,
+    });
+
+  it.each([-0.1, -1, 50.01, 51, 'wide', null, true])(
+    'rejects coastalBufferKm %j before any request',
+    async (coastalBufferKm) => {
+      const fetchFake = serve();
+      const error = errorOf(await run({ ...PARIS, coastalBufferKm }));
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['coastalBufferKm'] })]);
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [0.14, '0.14'],
+    [5, '5'],
+    [50, '50'],
+  ])(
+    'sends coastalBufferKm %j as radius %j on containment alone',
+    async (coastalBufferKm, radius) => {
+      const fetchFake = serve();
+      await run({ ...PARIS, coastalBufferKm, includeTimezone: true });
+      expect(sentTo(fetchFake, 'countrySubdivisionJSON')).toEqual([
+        ['lat', '48.8566'],
+        ['lng', '2.3522'],
+        ['level', '5'],
+        ['radius', radius],
+      ]);
+      expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual(['radius', '20']);
+      expect(sentTo(fetchFake, 'timezoneJSON')).toEqual([
+        ['lat', '48.8566'],
+        ['lng', '2.3522'],
+      ]);
+    },
+  );
+
+  it.each([
+    ['omitted', {}],
+    ['0', { coastalBufferKm: 0 }],
+    ['blank', { coastalBufferKm: '' }],
+    ['whitespace', { coastalBufferKm: '  ' }],
+  ])(
+    'sends no radius when coastalBufferKm is %s, and shares the unbuffered cache entry',
+    async (_label, extra) => {
+      const fetchFake = serveOffshore();
+      const first = await run({ ...SEA, nearbyLimit: 0, ...extra });
+      const second = await run({ ...SEA, nearbyLimit: 0 });
+      expect(sentTo(fetchFake, 'countrySubdivisionJSON')).toEqual([
+        ['lat', '30'],
+        ['lng', '-40'],
+        ['level', '5'],
+      ]);
+      expect(endpoints(fetchFake)).toEqual(['countrySubdivisionJSON', 'oceanJSON']);
+      expect(first.structuredContent).toEqual(second.structuredContent);
+      expect(textOf(first)).toBe(textOf(second));
+    },
+  );
+
+  it('matches the harbor point to New Jersey, with its distance and no ocean request', async () => {
+    const fetchFake = harbor({ timezone: () => jsonResponse(TIMEZONE_PARIS_BODY) });
+    const result = page(await run({ ...HARBOR, coastalBufferKm: 5, includeTimezone: true }));
+    expect(result.country).toEqual({
+      countryCode: 'US',
+      countryName: 'United States',
+      distanceInKm: 0.134,
+    });
+    expect(result.adminLevels).toEqual([
+      { level: 1, code: 'NJ', name: 'New Jersey', geonameId: 5101760, isoCode: 'NJ' },
+      { level: 2, code: '017', name: 'Hudson', geonameId: 5099357 },
+    ]);
+    expect(result).not.toHaveProperty('ocean');
+    expect(endpoints(fetchFake)).not.toContain('oceanJSON');
+    expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON').slice(0, 2)).toEqual([
+      ['lat', '40.69'],
+      ['lng', '-74.03'],
+    ]);
+    expect(sentTo(fetchFake, 'timezoneJSON')).toEqual([
+      ['lat', '40.69'],
+      ['lng', '-74.03'],
+    ]);
+    expectInOrder(result.notice, [
+      'No country contains this point exactly',
+      'United States (US)',
+      '0.134 km away',
+      'within the 5 km coastal buffer',
+    ]);
+  });
+
+  it('renders the buffered match with its distance, and the notice, in content[]', async () => {
+    harbor();
+    const result = await run({ ...HARBOR, coastalBufferKm: 5, nearbyLimit: 0 });
+    const rendered = textOf(result);
+    expect(rendered).toContain(
+      '**Country:** United States (US), 0.134 km away (matched within the coastal buffer)',
+    );
+    expect(rendered).toContain('| ADM2 | Hudson | 017 | 5099357 | Not available |');
+    expect(rendered).not.toContain('**Ocean or sea:**');
+    expect(allText(result)).toContain(page(result).notice ?? 'missing notice');
+  });
+
+  it('renders a buffered match whose country GeoNames sent no name for', async () => {
+    serve({ subdivision: () => jsonResponse({ countryCode: 'FR', distance: 0.048 }) });
+    const result = await run({ lat: 43.29, lng: 5.35, coastalBufferKm: 3, nearbyLimit: 0 });
+    expect(page(result).country).toEqual({ countryCode: 'FR', distanceInKm: 0.048 });
+    expect(textOf(result)).toContain(
+      '**Country:** (FR), 0.048 km away (matched within the coastal buffer)',
+    );
+    expectInOrder(page(result).notice, ['FR was matched 0.048 km away', 'within the 3 km']);
+  });
+
+  it.each([
+    ['Kehl, beside the French border', { lat: 48.5717, lng: 7.8147 }, SUBDIVISION_KEHL_BODY, 'DE'],
+    ['central Paris', PARIS, SUBDIVISION_PARIS_BODY, 'FR'],
+  ])(
+    'keeps the containment of %s, with no distance and no buffer notice',
+    async (_label, point, body, countryCode) => {
+      const fetchFake = serve({ subdivision: () => jsonResponse(body) });
+      const result = await run({ ...point, coastalBufferKm: 5, nearbyLimit: 0 });
+      expect(page(result).country?.countryCode).toBe(countryCode);
+      expect(page(result).country).not.toHaveProperty('distanceInKm');
+      expect(page(result)).not.toHaveProperty('notice');
+      expect(textOf(result)).not.toContain('coastal buffer');
+      expect(endpoints(fetchFake)).not.toContain('oceanJSON');
+    },
+  );
+
+  it('still returns the ocean when no country lies within the buffer, sending the ocean the exact point', async () => {
+    const fetchFake = serveOffshore();
+    const result = page(await run({ ...SEA, coastalBufferKm: 50, nearbyLimit: 0 }));
+    expect(sentTo(fetchFake, 'countrySubdivisionJSON')).toContainEqual(['radius', '50']);
+    expect(sentTo(fetchFake, 'oceanJSON')).toEqual([
+      ['lat', '30'],
+      ['lng', '-40'],
+    ]);
+    expect(result).not.toHaveProperty('country');
+    expect(result.ocean).toEqual({ name: 'North Atlantic Ocean', geonameId: 3373405 });
+    expect(result.notice).toBe(
+      'No country lies within 50 km of this point; it lies in North Atlantic Ocean.',
+    );
+  });
+
+  it('points the ocean-only notice at coastalBufferKm when no buffer was set', async () => {
+    serveOffshore();
+    const result = page(await run({ ...SEA, nearbyLimit: 0 }));
+    expectInOrder(result.notice, [
+      'No country contains this point',
+      'it lies in North Atlantic Ocean',
+      'harbor',
+      'coastalBufferKm (up to 50)',
+    ]);
+  });
+
+  it('points the no-country, no-ocean notice at coastalBufferKm only when no buffer was set', async () => {
+    serveOffshore({ ocean: status(15, 'no ocean found') });
+    const station = { lat: -77.846, lng: 166.676, nearbyLimit: 0 };
+    expectInOrder(page(await run(station)).notice, [
+      'no country or ocean',
+      'polar or unmapped',
+      'boundingBox',
+      "just outside a country's outline",
+      'coastalBufferKm (up to 50)',
+    ]);
+    const buffered = page(await run({ ...station, coastalBufferKm: 10 })).notice;
+    expect(buffered).not.toContain("just outside a country's outline");
+    expect(buffered).not.toContain('set coastalBufferKm');
+  });
+
+  it('names the buffer when neither a country within it nor an ocean is found', async () => {
+    serveOffshore({ ocean: status(15, 'no ocean found') });
+    const result = page(await run({ lat: 89.9, lng: 0, coastalBufferKm: 10, nearbyLimit: 0 }));
+    expectInOrder(result.notice, [
+      'GeoNames has no country within 10 km of this point and no ocean for it',
+      'polar or unmapped',
+      'boundingBox',
+    ]);
+  });
+
+  it('caches a buffered match, so a repeat spends nothing and never asks for the ocean', async () => {
+    const fetchFake = harbor();
+    await run({ ...HARBOR, coastalBufferKm: 5, nearbyLimit: 0 });
+    const repeat = page(await run({ ...HARBOR, coastalBufferKm: 5, nearbyLimit: 0 }));
+    expect(endpoints(fetchFake)).toEqual(['countrySubdivisionJSON']);
+    expect(repeat.country?.distanceInKm).toBe(0.134);
+  });
+
+  it('says what a buffered country carries in the output schema', () => {
+    const { country, adminLevels, ocean } = reverseGeocodeTool.output.shape;
+    expect(country.description).toContain('coastalBufferKm');
+    expect(country.unwrap().shape.distanceInKm.description).toContain('coastalBufferKm');
+    expect(adminLevels.description).toContain('coastalBufferKm');
+    expect(adminLevels.element.description).toContain('coastalBufferKm');
+    expect(ocean.description).toContain('coastalBufferKm');
+    expect(reverseGeocodeTool.description).toContain('coastalBufferKm');
+  });
+});
+
 describe('input conflicts', () => {
   it.each([
     [{ cities: 'cities1000', featureClasses: 'T' }],
@@ -921,6 +1175,91 @@ describe('input conflicts', () => {
     serve();
     const error = errorOf(await run({ ...PARIS, nearbyLimit: 0, featureCodes: 'ZZZZ' }));
     expect(error.data?.reason).toBe('unknown_feature_code');
+  });
+
+  it.each([
+    [{ featureClasses: 'T', featureCodes: 'MT,PK' }, ['T'], ['MT', 'PK']],
+    [{ featureClasses: 't,h', featureCodes: 'MT,LK' }, ['T', 'H'], ['MT', 'LK']],
+  ])("sends %j, whose classes are exactly its codes' classes", async (filters, classes, codes) => {
+    const fetchFake = serve();
+    expect(page(await run({ ...PARIS, ...filters })).nearbyKind).toBe('features');
+    const params = sentTo(fetchFake, 'findNearbyJSON');
+    expect(params.filter(([name]) => name === 'featureClass').map(([, value]) => value)).toEqual(
+      classes,
+    );
+    expect(params.filter(([name]) => name === 'featureCode').map(([, value]) => value)).toEqual(
+      codes,
+    );
+  });
+
+  /** Mount Rainier, the point the mismatch repros use. */
+  const RAINIER = { lat: 46.85, lng: -121.76, radiusKm: 10 } as const;
+
+  it.each([
+    [
+      { featureClasses: 'H', featureCodes: 'MT' },
+      { featureCodes: ['MT'], featureClasses: ['H'] },
+      ['MT is class T, outside featureClasses', 'class H has no code in featureCodes'],
+    ],
+    [
+      { featureClasses: 'T,H', featureCodes: 'MT' },
+      { featureCodes: [], featureClasses: ['H'] },
+      ['class H has no code in featureCodes'],
+    ],
+    [
+      { featureClasses: 'T', featureCodes: 'MT,LK' },
+      { featureCodes: ['LK'], featureClasses: [] },
+      ['LK is class H, outside featureClasses'],
+    ],
+  ])(
+    'feature_filter_mismatch for %j: no request, at any nearbyLimit',
+    async (filters, offending, stems) => {
+      const fetchFake = serve();
+      for (const nearbyLimit of [5, 0]) {
+        const result = await run({ ...RAINIER, ...filters, nearbyLimit });
+        const error = expectDeclaredError(reverseGeocodeTool, result, 'feature_filter_mismatch');
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.data).toMatchObject(offending);
+        expectInOrder(error.message, [
+          'GeoNames applies featureClasses and featureCodes together',
+          ...stems,
+        ]);
+        expect(allText(result)).toContain(`Error: ${error.message}`);
+        expect(allText(result)).toContain(
+          `Recovery: ${declaredError(reverseGeocodeTool, 'feature_filter_mismatch').recovery}`,
+        );
+        expect(allText(result)).toContain('reason feature_filter_mismatch');
+      }
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('feature_filter_mismatch names each entry once and fires before the account check', async () => {
+    serve({}, { server: false });
+    const error = errorOf(await run({ ...RAINIER, featureClasses: 'H,H', featureCodes: 'MT,MT' }));
+    expect(error.message).toBe(
+      'GeoNames applies featureClasses and featureCodes together, so these entries can never match: MT is class T, outside featureClasses; class H has no code in featureCodes.',
+    );
+    expect(error.data).toMatchObject({ featureCodes: ['MT'], featureClasses: ['H'] });
+  });
+
+  it('conflicting_filters and unknown_feature_code both win over a mismatched pair', async () => {
+    serve();
+    expect(
+      errorOf(
+        await run({ ...RAINIER, cities: 'cities1000', featureClasses: 'H', featureCodes: 'MT' }),
+      ).data?.reason,
+    ).toBe('conflicting_filters');
+    expect(
+      errorOf(await run({ ...RAINIER, featureClasses: 'H', featureCodes: 'MT,ZZZZ' })).data?.reason,
+    ).toBe('unknown_feature_code');
+  });
+
+  it('says featureClasses and featureCodes intersect', () => {
+    const { featureClasses, featureCodes } = reverseGeocodeTool.input.shape;
+    expect(featureClasses.description).toContain('intersect');
+    expect(featureCodes.description).toContain('intersect');
+    expect(featureCodes.description).toContain('Each code implies its class');
   });
 });
 
@@ -1390,7 +1729,7 @@ describe('format()', () => {
     expect(rendered).toContain('| ADM1 | Washington | Not available | 5815135 | Not available |');
     expect(rendered).toContain('- **IANA id:** Not available');
     expect(rendered).toContain('- **Country:** Not available');
-    expect(rendered).toContain('- **UTC offsets (hours):** standard -3, 1 January -3, 1 July 0');
+    expect(rendered).toContain('- **UTC offsets (hours):** standard -3, 1 January -3, 1 July -3');
     expect(rendered).toContain('- **Local time:** Not available');
     expect(rendered).toContain('- **Sunrise:** Not available');
     expect(rendered).toContain('- **Sunset:** Not available');

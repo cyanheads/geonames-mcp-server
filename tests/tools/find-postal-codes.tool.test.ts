@@ -6,6 +6,7 @@
  * @module tests/tools/find-postal-codes.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { logger } from '@cyanheads/mcp-ts-core/utils';
@@ -296,11 +297,13 @@ describe('input normalization', () => {
     expect(sent(fetchFake).map(([name]) => name)).not.toContain('country');
   });
 
-  it.each(['USA', 'U', '1A', ['US', 'ZZZ'], 'a'.repeat(3)])(
-    'rejects countries %j',
+  it.each(['U', '1A', 'USAA', '84', ['US', 'U1']])(
+    'rejects countries %j at the schema',
     async (countries) => {
+      const fetchFake = serve();
       const error = errorOf(await run({ mode: 'code', postalCode: '98101', countries }));
       expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(fetchFake).not.toHaveBeenCalled();
     },
   );
 
@@ -732,6 +735,100 @@ describe('mode_fields_mismatch', () => {
     expect(page(await run({ mode: 'nearby', lat: 47.6, lng: -122.3, placeName: 'x' })).mode).toBe(
       'nearby',
     );
+  });
+});
+
+describe('alpha-3 and numeric country codes', () => {
+  const countryParams = (fetchFake: ReturnType<typeof serve>) =>
+    sent(fetchFake).filter(([name]) => name === 'country');
+
+  const RECOVERY =
+    'Find the country with geonames_get_countries (nameContains matches its name), then call again with its alpha-2, alpha-3, or numeric code.';
+
+  it('mode code with IRL sends IE, and a miss keeps the Ireland routing-key notice', async () => {
+    const fetchFake = serve({ search: EMPTY });
+    const result = await run({ mode: 'code', postalCode: 'D02 X285', countries: ['IRL'] });
+    expect(countryParams(fetchFake)).toEqual([['country', 'IE']]);
+    const zeroHit = page(result);
+    expect(zeroHit).toMatchObject({ postalCodes: [], shown: 0 });
+    expectInOrder(zeroHit.notice, ['Eircode routing key', 'retry with that prefix']);
+    expect(zeroHit.notice).not.toContain('no postal data');
+    expect(allText(result)).toContain('Eircode routing key');
+  });
+
+  it.each([
+    ['deu, 250', ['DE', 'FR']],
+    [
+      ['372', 'nld'],
+      ['IE', 'NL'],
+    ],
+    ['uk, GBR, 826', ['GB', 'GB', 'GB']],
+  ])('mode place_name sends %j as alpha-2', async (countries, expected) => {
+    const fetchFake = serve();
+    await run({ mode: 'place_name', placeName: 'Springfield', countries });
+    expect(countryParams(fetchFake)).toEqual(expected.map((code) => ['country', code]));
+  });
+
+  it.each([
+    ['ZZZ', ['ZZZ'], 'No country has the code ZZZ.'],
+    ['aaa', ['AAA'], 'No country has the code AAA.'],
+    ['999', ['999'], 'No country has the code 999.'],
+    [['US', 'ZZZ', 'irl', '000'], ['ZZZ', '000'], 'No country has the codes ZZZ, 000.'],
+  ])('fails %j as unknown_country_code before any request', async (countries, unknown, opening) => {
+    const fetchFake = serve();
+    const result = await run({ mode: 'code', postalCode: '98101', countries });
+    const error = expectDeclaredError(findPostalCodesTool, result, 'unknown_country_code');
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toMatchObject({ countries: unknown });
+    expect(error.message).toBe(
+      `${opening} countries takes ISO 3166-1 codes: alpha-2 (US, GB, DE), alpha-3 (USA), or three-digit numeric (840).`,
+    );
+    expect(allText(result)).toContain(`Error: ${error.message}`);
+    expect(allText(result)).toContain(`Recovery: ${RECOVERY}`);
+    expect(allText(result)).toContain('reason unknown_country_code');
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it('declares the recovery that points to geonames_get_countries', () => {
+    expect(declaredError(findPostalCodesTool, 'unknown_country_code').recovery).toBe(RECOVERY);
+  });
+
+  it('checks country codes after the mode fields', async () => {
+    const fetchFake = serve();
+    const reasonFor = async (input: Record<string, unknown>) =>
+      errorOf(await run({ countries: 'ZZZ', ...input })).data?.reason;
+    expect(await reasonFor({ mode: 'code' })).toBe('mode_fields_mismatch');
+    expect(await reasonFor({ mode: 'place_name' })).toBe('mode_fields_mismatch');
+    expect(await reasonFor({ mode: 'nearby', lat: 47.6, lng: -122.3 })).toBe(
+      'mode_fields_mismatch',
+    );
+    expect(await reasonFor({ mode: 'place_name', placeName: 'Dublin' })).toBe(
+      'unknown_country_code',
+    );
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it('checks country codes before it resolves an account', async () => {
+    serve({}, { server: false });
+    expect(
+      errorOf(await run({ mode: 'code', postalCode: '98101', countries: 'ZZZ' })).data?.reason,
+    ).toBe('unknown_country_code');
+    expect(
+      errorOf(await run({ mode: 'code', postalCode: '98101', countries: 'IRL' })).data?.reason,
+    ).toBe('username_required');
+  });
+
+  it('advertises alpha-2, alpha-3, and numeric items in tools/list, and says so', () => {
+    const { countries } =
+      z.toJSONSchema(findPostalCodesTool.input, { io: 'input', target: 'draft-2020-12' })
+        .properties ?? {};
+    expect(countries).toMatchObject({ items: { pattern: '^([A-Z]{2,3}|\\d{3})$' } });
+    expectInOrder((countries as { description?: string }).description, [
+      'alpha-2',
+      'alpha-3',
+      'numeric',
+      'Modes code and place_name only.',
+    ]);
   });
 });
 

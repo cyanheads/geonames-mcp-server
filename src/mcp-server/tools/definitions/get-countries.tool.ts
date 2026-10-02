@@ -77,7 +77,9 @@ export const getCountriesTool = tool('geonames_get_countries', {
             isoNumeric: z
               .string()
               .optional()
-              .describe('ISO 3166-1 numeric code. Absent where GeoNames gives none.'),
+              .describe(
+                'ISO 3166-1 numeric code. Absent where ISO assigns none (Kosovo) or GeoNames gives none.',
+              ),
             fipsCode: z
               .string()
               .optional()

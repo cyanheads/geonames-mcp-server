@@ -341,13 +341,52 @@ export const TIMEZONE_PARIS_BODY = {
   sunset: '2026-09-30 19:34',
 };
 
-/** `timezoneJSON` offshore: only the three offsets. */
+/** `timezoneJSON` offshore: only the three offsets, `dstOffset` the 0 placeholder. */
 export const TIMEZONE_OFFSHORE_BODY = {
   lat: 30,
   lng: -40,
   rawOffset: -3,
   gmtOffset: -3,
   dstOffset: 0,
+};
+
+/** `timezoneJSON` in the open Pacific, as received: UTC-10 with the `dstOffset: 0` placeholder. */
+export const TIMEZONE_OPEN_PACIFIC_BODY = {
+  lng: -150,
+  gmtOffset: -10,
+  rawOffset: -10,
+  dstOffset: 0,
+  lat: 0,
+};
+
+/** `timezoneJSON` for Reykjavik: a land zone at UTC+0 all year, so its 0 offsets are real. */
+export const TIMEZONE_REYKJAVIK_BODY = {
+  timezoneId: 'Atlantic/Reykjavik',
+  countryCode: 'IS',
+  countryName: 'Iceland',
+  lat: 64.1355,
+  lng: -21.8954,
+  rawOffset: 0,
+  gmtOffset: 0,
+  dstOffset: 0,
+  time: '2026-10-01 12:00',
+  sunrise: '2026-10-01 07:52',
+  sunset: '2026-10-01 19:06',
+};
+
+/** `timezoneJSON` for Accra: a land zone at UTC+0 all year. */
+export const TIMEZONE_ACCRA_BODY = {
+  timezoneId: 'Africa/Accra',
+  countryCode: 'GH',
+  countryName: 'Ghana',
+  lat: 5.556,
+  lng: -0.1969,
+  rawOffset: 0,
+  gmtOffset: 0,
+  dstOffset: 0,
+  time: '2026-10-01 12:00',
+  sunrise: '2026-10-01 05:51',
+  sunset: '2026-10-01 17:55',
 };
 
 /** `postalCodeSearchJSON` with a numeric-typed code and the optional fields. */
@@ -697,6 +736,33 @@ export const COUNTRY_TABLE_BODY = {
     },
     COUNTRY_INFO_BODY.geonames[0],
   ],
+};
+
+/** Kosovo's `countryInfoJSON` row as received: ISO assigns it no numeric code, so GeoNames sends `"0"`. */
+export const COUNTRY_KOSOVO_ROW = {
+  continent: 'EU',
+  capital: 'Pristina',
+  languages: 'sq,sr',
+  geonameId: 831053,
+  south: 41.857641001,
+  isoAlpha3: 'XKX',
+  north: 43.2676851730001,
+  fipsCode: 'KV',
+  population: '1845300',
+  east: 21.7898670000001,
+  isoNumeric: '0',
+  areaInSqKm: '10908.0',
+  countryCode: 'XK',
+  west: 20.014284,
+  countryName: 'Kosovo',
+  postalCodeFormat: '',
+  continentName: 'Europe',
+  currencyCode: 'EUR',
+};
+
+/** {@link COUNTRY_TABLE_BODY} plus Kosovo, which sorts last. */
+export const COUNTRY_TABLE_WITH_KOSOVO_BODY = {
+  geonames: [...COUNTRY_TABLE_BODY.geonames, COUNTRY_KOSOVO_ROW],
 };
 
 /** `countryInfoJSON` with one row that carries only the fields every country must have. */

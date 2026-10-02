@@ -1,7 +1,10 @@
 /**
  * @fileoverview geonames_get_children — the direct children of a GeoNames feature in the
- * administrative, tourism, geography, or dependency tree (`childrenJSON`, 1 credit,
- * cached a day). The whole list is fetched once, so paging and name filtering are local.
+ * administrative, tourism, or dependency tree (`childrenJSON`, 1 credit, cached a day). The
+ * whole list is fetched once, so paging and name filtering are local. A non-empty tourism
+ * or dependency list is compared with the administrative one, which GeoNames returns in its
+ * place when the feature has no such tree (1 more credit unless cached); an empty one is
+ * not, since by that fallback the administrative list is empty too.
  * @module mcp-server/tools/definitions/get-children.tool
  */
 
@@ -20,13 +23,40 @@ import {
   USERNAME_ALIASES,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
-import type { Toponym } from '@/services/geonames/types.js';
+import type { ChildHierarchy, ChildrenResult, Toponym } from '@/services/geonames/types.js';
 import { inlineText, tableCell } from '@/utils/inline-text.js';
 
-const HIERARCHIES = ['administrative', 'tourism', 'geography', 'dependency'] as const;
+const HIERARCHIES = [
+  'administrative',
+  'tourism',
+  'dependency',
+] as const satisfies readonly ChildHierarchy[];
 
 /** The most rows `childrenJSON` is asked for per parent. */
 const FETCH_CAP = 1000;
+
+const fallbackRule = (tree: ChildHierarchy) =>
+  `GeoNames answers with the administrative children when a feature has no ${tree} tree`;
+
+/**
+ * True when a tree's whole fetched list is the administrative one: the same geonameIds,
+ * each as often, in any order, and the same upstream total.
+ */
+function isAdministrativeList(
+  tree: ChildrenResult,
+  administrative: ChildrenResult | undefined,
+): boolean {
+  if (
+    administrative?.totalCount !== tree.totalCount ||
+    administrative.children.length !== tree.children.length
+  ) {
+    return false;
+  }
+  const sortedIds = ({ children }: ChildrenResult) =>
+    children.map((child) => child.geonameId).toSorted((a, b) => a - b);
+  const administrativeIds = sortedIds(administrative);
+  return sortedIds(tree).every((id, index) => id === administrativeIds[index]);
+}
 
 /** A child row as this tool returns it: the gazetteer fields minus the country label, id, and distance. */
 const toChild = ({
@@ -43,14 +73,14 @@ const orNotAvailable = (value: string | undefined): string =>
 export const getChildrenTool = tool('geonames_get_children', {
   title: 'List GeoNames children',
   description:
-    "List the direct children of a GeoNames feature — a continent's countries, a country's first-level divisions, a state's counties, a city's sections — in the administrative tree, or in the tourism, geography, or dependency tree. Start from a country's geonameId (geonames_get_countries) or any admin division's. Only admin divisions and populated places appear; use geonames_search_places with a boundingBox for other feature types. The full child list is fetched once (1 GeoNames credit) and cached, so paging and nameContains filtering are free.",
+    "List the direct children of a GeoNames feature — Earth's continents, a continent's countries, a country's first-level divisions, a state's counties, a city's sections — in the administrative tree, or in the tourism tree (islands, coasts, and their municipalities; almost all in Spain) or the dependency tree (a country's dependent territories). Start from a country's geonameId (geonames_get_countries) or any admin division's. Children are mostly admin divisions (class A) and populated places (class P); continents and coasts are class L and islands class T. For other feature types inside a place, use geonames_search_places with a boundingBox. GeoNames answers a tourism or dependency request with the administrative children when the feature has no such tree, so the tool compares the two lists and sets sameAsAdministrative when they match, keeping the rows (a real tree can match too). The full child list is fetched once (1 GeoNames credit) and cached, so paging and nameContains filtering are free; a tourism or dependency call also reads the administrative list for the comparison, 1 more credit unless it is cached.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     geonameId: geonameIdInput.describe(
       'GeoNames id of the parent feature, a positive integer up to 2147483647 such as 6252001 (United States), as returned in geonameId by the other geonames tools. A geonames.org/<id> URL is reduced to its id.',
     ),
     hierarchy: blankAsUnset(lowerCased(z.enum(HIERARCHIES).default('administrative'))).describe(
-      'Which tree to descend: administrative (the default: countries, admin divisions, populated places), tourism (tourist regions and islands), geography (physical regions), or dependency (dependent territories). Case-insensitive.',
+      "Which tree to descend: administrative (the default: continents (class L), countries, admin divisions, populated places), tourism (islands (class T), coasts (class L), and their municipalities; almost all in Spain), or dependency (a country's dependent territories). For a feature with no tourism or dependency tree, GeoNames answers with its administrative children, which sameAsAdministrative flags; the comparison reads the administrative list, 1 more credit unless it is cached. Case-insensitive.",
     ),
     nameContains: nameContainsInput.describe(
       'Keep only children whose name or toponym name contains every word of this text as a substring (kansas also matches Arkansas), ignoring case, accents, and punctuation.',
@@ -64,6 +94,12 @@ export const getChildrenTool = tool('geonames_get_children', {
     found: z.boolean().describe('False when GeoNames has no feature with this geonameId.'),
     parentGeonameId: z.number().describe('The geonameId whose children were requested.'),
     hierarchy: z.enum(HIERARCHIES).describe('The tree that was descended.'),
+    sameAsAdministrative: z
+      .boolean()
+      .optional()
+      .describe(
+        'Tourism and dependency trees only, when the feature has children there: true when they are exactly its administrative children (same geonameIds and total). GeoNames answers with the administrative children when a feature has no such tree, so true most likely means it has none; a real tree can also match.',
+      ),
     guidance: z.string().optional().describe('What to do next; present only when found is false.'),
     children: z
       .array(
@@ -134,7 +170,7 @@ export const getChildrenTool = tool('geonames_get_children', {
       .string()
       .optional()
       .describe(
-        'Guidance when there are no children, nothing matched, the offset is past the end, more pages remain, or GeoNames holds more children than it returns.',
+        'Guidance when a tourism or dependency answer is the administrative children, there are no children, nothing matched, the offset is past the end, more pages remain, or GeoNames holds more children than it returns.',
       ),
   },
   errors: [
@@ -190,12 +226,8 @@ export const getChildrenTool = tool('geonames_get_children', {
     const { hierarchy } = input;
     const parentGeonameId = Number(input.geonameId);
     const service = getGeoNamesService();
-    const result = await service.children(
-      input.geonameId,
-      hierarchy,
-      service.resolveAccount(input.geonamesUsername),
-      ctx,
-    );
+    const account = service.resolveAccount(input.geonamesUsername);
+    const result = await service.children(input.geonameId, hierarchy, account, ctx);
     if (result === undefined) {
       return {
         found: false,
@@ -207,6 +239,13 @@ export const getChildrenTool = tool('geonames_get_children', {
     }
 
     const all = result.children;
+    const sameAsAdministrative =
+      hierarchy === 'administrative' || all.length === 0
+        ? undefined
+        : isAdministrativeList(
+            result,
+            await service.children(input.geonameId, 'administrative', account, ctx),
+          );
     const matcher = input.nameContains === undefined ? undefined : nameMatcher(input.nameContains);
     const matches = matcher ? all.filter((child) => matcher([child.name, child.toponymName])) : all;
     const { page, nextOffset } = paginate(matches, input.offset, input.limit);
@@ -214,11 +253,16 @@ export const getChildrenTool = tool('geonames_get_children', {
     ctx.enrich.total(matches.length);
     ctx.enrich({ shown: page.length });
     const fragments: string[] = [];
+    if (sameAsAdministrative) {
+      fragments.push(
+        `These are the same children as the administrative tree's. ${fallbackRule(hierarchy)}, so this feature most likely has none; a real ${hierarchy} tree can also match its administrative children.`,
+      );
+    }
     if (all.length === 0) {
       fragments.push(
         hierarchy === 'administrative'
-          ? 'This feature has no children in the administrative tree. Try hierarchy tourism, geography, or dependency, or search inside it with geonames_search_places and a boundingBox.'
-          : `This feature has no children in the ${hierarchy} tree; call again with hierarchy administrative.`,
+          ? 'This feature has no children in the administrative tree. Try hierarchy tourism or dependency, or search inside it with geonames_search_places and a boundingBox.'
+          : `This feature has no children in the ${hierarchy} tree, nor in the administrative tree: ${fallbackRule(hierarchy)}. Try hierarchy ${hierarchy === 'tourism' ? 'dependency' : 'tourism'}, or search inside it with geonames_search_places and a boundingBox.`,
       );
     } else if (matches.length === 0 && input.nameContains !== undefined) {
       fragments.push(
@@ -247,17 +291,24 @@ export const getChildrenTool = tool('geonames_get_children', {
       found: true,
       parentGeonameId,
       hierarchy,
+      ...(sameAsAdministrative === undefined ? {} : { sameAsAdministrative }),
       children: page.map(toChild),
       ...(nextOffset === undefined ? {} : { nextOffset }),
     };
   },
 
   format: (result) => {
+    const tree = result.sameAsAdministrative
+      ? `${result.hierarchy} tree: same as the administrative children, GeoNames' answer when a feature has no ${result.hierarchy} tree`
+      : `${result.hierarchy} tree`;
     const lines = [
-      `## GeoNames children of geonameId ${result.parentGeonameId} (${result.hierarchy} tree)`,
+      `## GeoNames children of geonameId ${result.parentGeonameId} (${tree})`,
       '',
       `**Found:** ${result.found}`,
     ];
+    if (result.sameAsAdministrative !== undefined) {
+      lines.push('', `**Same as administrative children:** ${result.sameAsAdministrative}`);
+    }
     if (result.guidance !== undefined) lines.push('', inlineText(result.guidance));
     if (result.found && result.children.length === 0) {
       lines.push('', 'No children on this page.');

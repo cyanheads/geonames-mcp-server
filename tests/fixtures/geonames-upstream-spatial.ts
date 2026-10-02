@@ -138,6 +138,269 @@ export const CHILDREN_SPARSE_BODY = {
   geonames: [{ geonameId: 6618620, name: 'Paris 04', toponymName: 'Paris 04' }],
 };
 
+const ADMIN_DIVISION = { fcl: 'A', fclName: 'country, state, region,...' };
+const ES_ADM1 = {
+  ...ADMIN_DIVISION,
+  fcode: 'ADM1',
+  fcodeName: 'first-order administrative division',
+  countryCode: 'ES',
+  countryName: 'Spain',
+  countryId: '2510769',
+};
+const ES_ADM2 = { ...ES_ADM1, fcode: 'ADM2', fcodeName: 'second-order administrative division' };
+
+/**
+ * `childrenJSON` for Spain (2510769) in the administrative tree: four autonomous
+ * communities (a partial list of the 19). Spain has no dependency tree, and GeoNames
+ * answers `hierarchy=dependency` with this same list.
+ */
+export const CHILDREN_SPAIN_REGIONS_BODY = {
+  totalResultsCount: 4,
+  geonames: [
+    {
+      ...ES_ADM1,
+      geonameId: 2593109,
+      name: 'Andalusia',
+      toponymName: 'Andalusia',
+      lat: '37.5',
+      lng: '-4.58333',
+      adminCode1: '51',
+      adminName1: 'Andalusia',
+      adminCodes1: { ISO3166_2: 'AN' },
+      population: 8631862,
+    },
+    {
+      ...ES_ADM1,
+      geonameId: 3336899,
+      name: 'Aragon',
+      toponymName: 'Aragon',
+      lat: '41.5',
+      lng: '-0.66667',
+      adminCode1: '52',
+      adminName1: 'Aragon',
+      adminCodes1: { ISO3166_2: 'AR' },
+      population: 1351591,
+    },
+    {
+      ...ES_ADM1,
+      geonameId: 3114710,
+      name: 'Asturias',
+      toponymName: 'Principality of Asturias',
+      lat: '43.33333',
+      lng: '-6',
+      adminCode1: '34',
+      adminName1: 'Asturias',
+      adminCodes1: { ISO3166_2: 'AS' },
+      population: 1009599,
+    },
+    {
+      ...ES_ADM1,
+      geonameId: 2593110,
+      name: 'Canary Islands',
+      toponymName: 'Canary Islands',
+      lat: '28',
+      lng: '-15.5',
+      adminCode1: '53',
+      adminName1: 'Canary Islands',
+      adminCodes1: { ISO3166_2: 'CN' },
+      population: 2272734,
+    },
+  ],
+};
+
+/** `childrenJSON` for the Canary Islands (2593110) in the administrative tree: its two provinces. */
+export const CHILDREN_CANARIES_PROVINCES_BODY = {
+  totalResultsCount: 2,
+  geonames: [
+    {
+      ...ES_ADM2,
+      geonameId: 2515271,
+      name: 'Las Palmas',
+      toponymName: 'Provincia de Las Palmas',
+      lat: '28.42039',
+      lng: '-14.01306',
+      adminCode1: '53',
+      adminName1: 'Canary Islands',
+      adminCodes1: { ISO3166_2: 'CN' },
+      population: 1145843,
+    },
+    {
+      ...ES_ADM2,
+      geonameId: 2511173,
+      name: 'Santa Cruz de Tenerife',
+      toponymName: 'Provincia de Santa Cruz de Tenerife',
+      lat: '28.16667',
+      lng: '-17.33333',
+      adminCode1: '53',
+      adminName1: 'Canary Islands',
+      adminCodes1: { ISO3166_2: 'CN' },
+      population: 1067173,
+    },
+  ],
+};
+
+/**
+ * `childrenJSON` for Castilla y León (3336900): three of its nine provinces. Its tourism
+ * tree is real and holds the same nine provinces, so both trees answer with this list.
+ */
+export const CHILDREN_CASTILLA_Y_LEON_PROVINCES_BODY = {
+  totalResultsCount: 3,
+  geonames: [
+    {
+      ...ES_ADM2,
+      geonameId: 3129138,
+      name: 'Avila',
+      toponymName: 'Provincia de Ávila',
+      lat: '40.58333',
+      lng: '-5',
+      adminCode1: '55',
+      adminName1: 'Castille and León',
+      adminCodes1: { ISO3166_2: 'CL' },
+      population: 158265,
+    },
+    {
+      ...ES_ADM2,
+      geonameId: 3118528,
+      name: 'Leon',
+      toponymName: 'Provincia de León',
+      lat: '42.66667',
+      lng: '-6',
+      adminCode1: '55',
+      adminName1: 'Castille and León',
+      adminCodes1: { ISO3166_2: 'CL' },
+      population: 463746,
+    },
+    {
+      ...ES_ADM2,
+      geonameId: 3127460,
+      name: 'Province of Burgos',
+      toponymName: 'Provincia de Burgos',
+      lat: '42.33939',
+      lng: '-3.70789',
+      adminCode1: '55',
+      adminName1: 'Castille and León',
+      adminCodes1: { ISO3166_2: 'CL' },
+      population: 358948,
+    },
+  ],
+};
+
+const GB_ADM1 = {
+  ...ADMIN_DIVISION,
+  fcode: 'ADM1',
+  fcodeName: 'first-order administrative division',
+  countryCode: 'GB',
+  countryName: 'United Kingdom',
+  countryId: '2635167',
+};
+
+/**
+ * `childrenJSON` for the United Kingdom (2635167) in the administrative tree: its four
+ * countries. The UK has no tourism tree, and GeoNames answers `hierarchy=tourism` with
+ * this same list.
+ */
+export const CHILDREN_UK_COUNTRIES_BODY = {
+  totalResultsCount: 4,
+  geonames: [
+    {
+      ...GB_ADM1,
+      geonameId: 6269131,
+      name: 'England',
+      toponymName: 'England',
+      lat: '52.16045',
+      lng: '-0.70312',
+      adminCode1: 'ENG',
+      adminName1: 'England',
+      adminCodes1: { ISO3166_2: 'ENG' },
+      population: 57106398,
+    },
+    {
+      ...GB_ADM1,
+      geonameId: 2641364,
+      name: 'Northern Ireland',
+      toponymName: 'Northern Ireland',
+      lat: '54.5',
+      lng: '-6.5',
+      adminCode1: 'NIR',
+      adminName1: 'Northern Ireland',
+      adminCodes1: { ISO3166_2: 'NIR' },
+      population: 1910543,
+    },
+    {
+      ...GB_ADM1,
+      geonameId: 2638360,
+      name: 'Scotland',
+      toponymName: 'Scotland',
+      lat: '56',
+      lng: '-4',
+      adminCode1: 'SCT',
+      adminName1: 'Scotland',
+      adminCodes1: { ISO3166_2: 'SCT' },
+      population: 5439842,
+    },
+    {
+      ...GB_ADM1,
+      geonameId: 2634895,
+      name: 'Wales',
+      toponymName: 'Wales',
+      lat: '52.5',
+      lng: '-3.5',
+      adminCode1: 'WLS',
+      adminName1: 'Wales',
+      adminCodes1: { ISO3166_2: 'WLS' },
+      population: 3131640,
+    },
+  ],
+};
+
+const CROWN_DEPENDENCY = { ...ADMIN_DIVISION, fcode: 'PCL', fcodeName: 'political entity' };
+
+/**
+ * `childrenJSON` for the United Kingdom in the dependency tree: the three Crown
+ * dependencies (a partial list of the 16; the overseas territories are `PCLD`).
+ */
+export const CHILDREN_UK_DEPENDENCIES_BODY = {
+  totalResultsCount: 3,
+  geonames: [
+    {
+      ...CROWN_DEPENDENCY,
+      geonameId: 3042362,
+      name: 'Guernsey',
+      toponymName: 'Bailiwick of Guernsey',
+      lat: '49.45474',
+      lng: '-2.57629',
+      countryCode: 'GG',
+      countryName: 'Guernsey',
+      countryId: '3042362',
+      population: 65228,
+    },
+    {
+      ...CROWN_DEPENDENCY,
+      geonameId: 3042225,
+      name: 'Isle of Man',
+      toponymName: 'Isle of Man',
+      lat: '54.25',
+      lng: '-4.5',
+      countryCode: 'IM',
+      countryName: 'Isle of Man',
+      countryId: '3042225',
+      population: 84077,
+    },
+    {
+      ...CROWN_DEPENDENCY,
+      geonameId: 3042142,
+      name: 'Jersey',
+      toponymName: 'Bailiwick of Jersey',
+      lat: '49.21667',
+      lng: '-2.11667',
+      countryCode: 'JE',
+      countryName: 'Jersey',
+      countryId: '3042142',
+      population: 90812,
+    },
+  ],
+};
+
 /** `countrySubdivisionJSON` for Seattle (level 5): only the levels that exist, ISO code at level 1. */
 export const SUBDIVISION_SEATTLE_BODY = {
   countryCode: 'US',
@@ -151,6 +414,51 @@ export const SUBDIVISION_SEATTLE_BODY = {
   geonameId: 5799783,
   distance: 0,
   codes: [{ code: 'WA', level: '1', type: 'ISO3166-2' }],
+};
+
+/**
+ * `countrySubdivisionJSON` with `radius=5` in Upper New York Bay (40.69, -74.03), as received:
+ * no country contains the point, so GeoNames matched New Jersey 134 m away.
+ */
+export const SUBDIVISION_HUDSON_BUFFERED_BODY = {
+  adminCode2: '017',
+  codes: [
+    { code: '34', level: '1', type: 'FIPS10-4' },
+    { code: 'NJ', level: '1', type: 'ISO3166-2' },
+  ],
+  adminCode1: 'NJ',
+  adminName2: 'Hudson',
+  distance: 0.13428087486999998,
+  geonameId: 5099357,
+  countryCode: 'US',
+  admin1geonameId: 5101760,
+  countryName: 'United States',
+  adminName1: 'New Jersey',
+  admin2geonameId: 5099357,
+};
+
+/** `countrySubdivisionJSON` with `radius=5` at Kehl, beside the French border, as received: contained, `distance: 0`. */
+export const SUBDIVISION_KEHL_BODY = {
+  adminCode2: '083',
+  codes: [
+    { code: '01', level: '1', type: 'FIPS10-4' },
+    { code: 'BW', level: '1', type: 'ISO3166-2' },
+  ],
+  adminCode3: '08317',
+  adminCode1: '01',
+  distance: 0,
+  geonameId: 6558108,
+  admin1geonameId: 2953481,
+  adminCode4: '08317057',
+  admin2geonameId: 2925180,
+  adminName4: 'Kehl',
+  adminName3: 'Ortenaukreis',
+  adminName2: 'Freiburg Region',
+  countryCode: 'DE',
+  admin3geonameId: 3214109,
+  countryName: 'Germany',
+  adminName1: 'Baden-Wurttemberg',
+  admin4geonameId: 6558108,
 };
 
 /** `findNearbyJSON` for peaks and mountains around Mount Fuji's summit: search rows plus a string distance. */

@@ -1,9 +1,10 @@
 /**
  * @fileoverview geonames_get_children: input normalization and blank-as-unset, the request
  * each tree sends, row mapping, local paging and name filtering, every notice, the miss and
- * leaf results, the declared error contracts on the wire, the required enrichment on the
- * zero-result and under-cap pages, upstream failure classes, and format() parity with
- * structuredContent.
+ * leaf results, the tourism and dependency comparison with the administrative list (its
+ * requests per call sequence and its whole-list semantics), the declared error contracts on
+ * the wire, the required enrichment on the zero-result and under-cap pages, upstream failure
+ * classes, and format() parity with structuredContent.
  * @module tests/tools/get-children.tool.test
  */
 
@@ -31,8 +32,13 @@ import {
   textResponse,
 } from '../fixtures/geonames-upstream.js';
 import {
+  CHILDREN_CANARIES_PROVINCES_BODY,
   CHILDREN_CANARIES_TOURISM_BODY,
+  CHILDREN_CASTILLA_Y_LEON_PROVINCES_BODY,
+  CHILDREN_SPAIN_REGIONS_BODY,
   CHILDREN_SPARSE_BODY,
+  CHILDREN_UK_COUNTRIES_BODY,
+  CHILDREN_UK_DEPENDENCIES_BODY,
   CHILDREN_US_STATES_BODY,
   childrenBody,
 } from '../fixtures/geonames-upstream-spatial.js';
@@ -78,6 +84,7 @@ interface Page {
   nextOffset?: number;
   notice?: string;
   parentGeonameId: number;
+  sameAsAdministrative?: boolean;
   shown: number;
   totalCount: number;
   truncated: boolean;
@@ -90,6 +97,47 @@ const US = '6252001';
 /** Serves `body` for every `childrenJSON` call; returns the fetch fake. */
 const serve = (body: unknown = CHILDREN_US_STATES_BODY, status = 200) =>
   installService({ childrenJSON: () => jsonResponse(body, status) });
+
+/** `<geonameId> <tree>` of a `childrenJSON` request; no `hierarchy` param is the administrative tree. */
+const treeOf = (url: URL) =>
+  `${url.searchParams.get('geonameId')} ${url.searchParams.get('hierarchy') ?? 'administrative'}`;
+
+/**
+ * Serves each `childrenJSON` call from `bodies` by parent and tree (`'2510769 dependency'`);
+ * a request for a pair with no body fails the call loudly. Returns the fetch fake.
+ */
+const serveTrees = (bodies: Record<string, unknown>) =>
+  installService({
+    childrenJSON: (url) => {
+      const body = bodies[treeOf(url)];
+      if (body === undefined) throw new Error(`no childrenJSON body for ${treeOf(url)}`);
+      return jsonResponse(body);
+    },
+  });
+
+/** The parent and tree of every upstream request, in order. */
+const treesSent = (fetchFake: ReturnType<typeof serve>) => requestedUrls(fetchFake).map(treeOf);
+
+const SPAIN = '2510769';
+const UK = '2635167';
+const CANARIES = '2593110';
+const CASTILLA_Y_LEON = '3336900';
+const MALLORCA = '2514239';
+
+/** The trees GeoNames holds for the parents above, with its fallback answers filled in. */
+const TREES = {
+  [`${SPAIN} administrative`]: CHILDREN_SPAIN_REGIONS_BODY,
+  [`${SPAIN} dependency`]: CHILDREN_SPAIN_REGIONS_BODY,
+  [`${UK} administrative`]: CHILDREN_UK_COUNTRIES_BODY,
+  [`${UK} tourism`]: CHILDREN_UK_COUNTRIES_BODY,
+  [`${UK} dependency`]: CHILDREN_UK_DEPENDENCIES_BODY,
+  [`${CANARIES} administrative`]: CHILDREN_CANARIES_PROVINCES_BODY,
+  [`${CANARIES} tourism`]: CHILDREN_CANARIES_TOURISM_BODY,
+  [`${CASTILLA_Y_LEON} administrative`]: CHILDREN_CASTILLA_Y_LEON_PROVINCES_BODY,
+  [`${CASTILLA_Y_LEON} tourism`]: CHILDREN_CASTILLA_Y_LEON_PROVINCES_BODY,
+  [`${MALLORCA} administrative`]: EMPTY_GEONAMES_BODY,
+  [`${MALLORCA} tourism`]: childrenBody(53),
+};
 
 const page = (result: Parameters<typeof successOf>[0]) => successOf<Page>(result);
 
@@ -159,12 +207,12 @@ describe('input normalization', () => {
   });
 
   it.each([
-    ['Tourism', 'tourism'],
-    ['GEOGRAPHY', 'geography'],
-    ['Administrative', 'administrative'],
-  ])('reads hierarchy %j in any case as %s', async (hierarchy, expected) => {
-    const fetchFake = serve(CHILDREN_CANARIES_TOURISM_BODY);
-    expect(page(await run({ geonameId: '2593110', hierarchy })).hierarchy).toBe(expected);
+    ['Tourism', 'tourism', CANARIES],
+    ['DEPENDENCY', 'dependency', UK],
+    ['Administrative', 'administrative', CANARIES],
+  ])('reads hierarchy %j in any case as %s', async (hierarchy, expected, geonameId) => {
+    const fetchFake = serveTrees(TREES);
+    expect(page(await run({ geonameId, hierarchy })).hierarchy).toBe(expected);
     if (expected !== 'administrative') {
       expect(sent(fetchFake)).toContainEqual(['hierarchy', expected]);
     }
@@ -174,6 +222,39 @@ describe('input normalization', () => {
     const error = errorOf(await run({ geonameId: US, hierarchy: 'political' }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['hierarchy'] })]);
+  });
+
+  it.each(['geography', 'GEOGRAPHY', 'Geography'])(
+    'rejects hierarchy %j, a tree GeoNames holds no edges for, before any request',
+    async (hierarchy) => {
+      const fetchFake = serve();
+      const error = errorOf(await run({ geonameId: '1819730', hierarchy }));
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['hierarchy'] })]);
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('offers the administrative, tourism, and dependency trees and no other', () => {
+    expect(getChildrenTool.output.shape.hierarchy.options).toEqual([
+      'administrative',
+      'tourism',
+      'dependency',
+    ]);
+  });
+
+  it('describes the fallback, the comparison credit, and the class L and T children', () => {
+    for (const text of [
+      getChildrenTool.description,
+      getChildrenTool.input.shape.hierarchy.description,
+    ]) {
+      expect(text).toContain('sameAsAdministrative');
+      expect(text).toContain('1 more credit');
+      expect(text).toContain('class L');
+      expect(text).toContain('class T');
+      expect(text).not.toContain('geography');
+    }
+    expect(getChildrenTool.description).not.toContain('Only admin divisions and populated places');
   });
 
   it.each([0, -1, 501, 1.5, 'many', null])('rejects limit %j', async (limit) => {
@@ -231,7 +312,7 @@ describe('the upstream request', () => {
     expect(requestedUrls(fetchFake)[0]?.searchParams.get('username')).toBe(SERVER_USERNAME);
   });
 
-  it.each(['tourism', 'geography', 'dependency'])('sends hierarchy %s', async (hierarchy) => {
+  it.each(['tourism', 'dependency'])('sends hierarchy %s', async (hierarchy) => {
     const fetchFake = serve();
     expect(page(await run({ geonameId: US, hierarchy })).hierarchy).toBe(hierarchy);
     expect(sent(fetchFake)).toContainEqual(['hierarchy', hierarchy]);
@@ -339,15 +420,15 @@ describe('rows', () => {
     expect(result.children).toEqual([
       { geonameId: 6618620, name: 'Paris 04', toponymName: 'Paris 04' },
     ]);
-    serve(CHILDREN_CANARIES_TOURISM_BODY);
-    const tourism = page(await run({ geonameId: '2593110', hierarchy: 'tourism' }));
+    serveTrees(TREES);
+    const tourism = page(await run({ geonameId: CANARIES, hierarchy: 'tourism' }));
     expect(tourism.children[0]).not.toHaveProperty('population');
     expect(tourism.children[1]).not.toHaveProperty('countryCode');
   });
 
   it('echoes the tree that was descended', async () => {
-    serve(CHILDREN_CANARIES_TOURISM_BODY);
-    const result = page(await run({ geonameId: '2593110', hierarchy: 'tourism' }));
+    serveTrees(TREES);
+    const result = page(await run({ geonameId: CANARIES, hierarchy: 'tourism' }));
     expect(result).toMatchObject({ hierarchy: 'tourism', parentGeonameId: 2593110, totalCount: 2 });
   });
 });
@@ -481,19 +562,21 @@ describe('leaves and misses', () => {
     expect(result).not.toHaveProperty('guidance');
     expectInOrder(result.notice, [
       'no children in the administrative tree',
-      'hierarchy tourism',
+      'hierarchy tourism or dependency',
       'geonames_search_places',
       'boundingBox',
     ]);
+    expect(result.notice).not.toContain('geography');
   });
 
-  it('points a leaf in another tree back at the administrative tree', async () => {
+  it('does not send a leaf in another tree to the administrative tree, which is empty too', async () => {
     serve(EMPTY_GEONAMES_BODY);
     const result = page(await run({ geonameId: US, hierarchy: 'dependency' }));
     expectInOrder(result.notice, [
-      'no children in the dependency tree',
-      'hierarchy administrative',
+      'no children in the dependency tree, nor in the administrative tree',
+      'hierarchy tourism',
     ]);
+    expect(result.notice).not.toContain('hierarchy administrative');
   });
 
   it('keeps the leaf notice ahead of a name filter that has nothing to filter', async () => {
@@ -561,6 +644,289 @@ describe('leaves and misses', () => {
     expect(result).toMatchObject({ found: false, hierarchy: 'tourism', shown: 0, totalCount: 0 });
     expect(result).not.toHaveProperty('notice');
   });
+});
+
+describe('the administrative fallback in the tourism and dependency trees', () => {
+  const FALLBACK = 'GeoNames answers with the administrative children when a feature has no';
+  const names = (result: Page) => result.children.map((child) => child.name);
+
+  it('an administrative call makes one request and carries no sameAsAdministrative', async () => {
+    const fetchFake = serveTrees(TREES);
+    const result = page(await run({ geonameId: SPAIN }));
+    await run({ geonameId: SPAIN, limit: 1, offset: 2 });
+    expect(treesSent(fetchFake)).toEqual([`${SPAIN} administrative`]);
+    expect(result).not.toHaveProperty('sameAsAdministrative');
+    expect(result.notice).toBeUndefined();
+  });
+
+  it.each([
+    [SPAIN, 'dependency', ['Andalusia', 'Aragon', 'Asturias', 'Canary Islands']],
+    [UK, 'tourism', ['England', 'Northern Ireland', 'Scotland', 'Wales']],
+  ])(
+    'keeps %s %s rows that are the administrative children and marks them',
+    async (geonameId, hierarchy, expected) => {
+      serveTrees(TREES);
+      const result = await run({ geonameId, hierarchy });
+      const data = page(result);
+      expect(data).toMatchObject({ found: true, hierarchy, sameAsAdministrative: true });
+      expect(names(data)).toEqual(expected);
+      expect(data.totalCount).toBe(expected.length);
+      expectInOrder(data.notice, [
+        'same children as the administrative tree',
+        `${FALLBACK} ${hierarchy} tree`,
+      ]);
+      expect(headingLines(textOf(result))).toEqual([
+        `## GeoNames children of geonameId ${geonameId} (${hierarchy} tree: same as the administrative children, GeoNames' answer when a feature has no ${hierarchy} tree)`,
+      ]);
+      expect(textOf(result)).toContain('**Same as administrative children:** true');
+      expect(allText(result)).toContain(data.notice ?? 'missing notice');
+    },
+  );
+
+  it('keeps and marks a real tree that matches its administrative children (Castilla y León)', async () => {
+    serveTrees(TREES);
+    const data = page(await run({ geonameId: CASTILLA_Y_LEON, hierarchy: 'Tourism' }));
+    expect(data.sameAsAdministrative).toBe(true);
+    expect(names(data)).toEqual(['Avila', 'Leon', 'Province of Burgos']);
+  });
+
+  it.each([
+    [UK, 'dependency', 3],
+    [CANARIES, 'tourism', 2],
+    [MALLORCA, 'tourism', 53],
+  ])(
+    'reports %s %s, a real tree, as not the administrative children',
+    async (geonameId, hierarchy, count) => {
+      serveTrees(TREES);
+      const result = await run({ geonameId, hierarchy, limit: 500 });
+      const data = page(result);
+      expect(data).toMatchObject({
+        found: true,
+        hierarchy,
+        sameAsAdministrative: false,
+        totalCount: count,
+      });
+      expect(data.notice).toBeUndefined();
+      expect(headingLines(textOf(result))).toEqual([
+        `## GeoNames children of geonameId ${geonameId} (${hierarchy} tree)`,
+      ]);
+      expect(textOf(result)).toContain('**Same as administrative children:** false');
+    },
+  );
+
+  describe('upstream requests', () => {
+    it('reads the tree, then the administrative list', async () => {
+      const fetchFake = serveTrees(TREES);
+      await run({ geonameId: UK, hierarchy: 'tourism' });
+      expect(treesSent(fetchFake)).toEqual([`${UK} tourism`, `${UK} administrative`]);
+      expect(requestedUrls(fetchFake).map((url) => url.searchParams.get('maxRows'))).toEqual([
+        '1000',
+        '1000',
+      ]);
+    });
+
+    it('spends one request on a tree after an administrative call for the same parent', async () => {
+      const fetchFake = serveTrees(TREES);
+      await run({ geonameId: UK });
+      const data = page(await run({ geonameId: UK, hierarchy: 'tourism' }));
+      expect(data.sameAsAdministrative).toBe(true);
+      expect(treesSent(fetchFake)).toEqual([`${UK} administrative`, `${UK} tourism`]);
+    });
+
+    it('spends nothing on an administrative call after a tree call for the same parent', async () => {
+      const fetchFake = serveTrees(TREES);
+      await run({ geonameId: UK, hierarchy: 'dependency' });
+      const data = page(await run({ geonameId: UK }));
+      expect(data).not.toHaveProperty('sameAsAdministrative');
+      expect(treesSent(fetchFake)).toEqual([`${UK} dependency`, `${UK} administrative`]);
+    });
+
+    it('spends nothing on a repeated tree call, and reads the administrative list once per parent', async () => {
+      const fetchFake = serveTrees(TREES);
+      await run({ geonameId: UK, hierarchy: 'tourism' });
+      await run({ geonameId: UK, hierarchy: 'tourism', limit: 2 });
+      await run({ geonameId: UK, hierarchy: 'dependency' });
+      expect(treesSent(fetchFake)).toEqual([
+        `${UK} tourism`,
+        `${UK} administrative`,
+        `${UK} dependency`,
+      ]);
+    });
+
+    it('spends one request on an unknown id, which has no administrative list to compare', async () => {
+      const fetchFake = installService({
+        childrenJSON: () => jsonResponse(statusEnvelope(11, 'no toponym found'), 404),
+      });
+      const data = page(await run({ geonameId: '999999999', hierarchy: 'dependency' }));
+      expect(data).toMatchObject({ found: false, hierarchy: 'dependency' });
+      expect(data).not.toHaveProperty('sameAsAdministrative');
+      expect(fetchFake).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails with the comparison request, and a retry spends only that request', async () => {
+      const answers = [jsonResponse(statusEnvelope(19, quotaMessage('hour', SERVER_USERNAME)))];
+      const fetchFake = installService({
+        childrenJSON: (url) =>
+          url.searchParams.has('hierarchy')
+            ? jsonResponse(CHILDREN_UK_COUNTRIES_BODY)
+            : (answers.shift() ?? jsonResponse(CHILDREN_UK_COUNTRIES_BODY)),
+      });
+      const failed = await run({ geonameId: UK, hierarchy: 'tourism' });
+      expectDeclaredError(getChildrenTool, failed, 'quota_exhausted');
+      const data = page(await run({ geonameId: UK, hierarchy: 'tourism' }));
+      expect(data.sameAsAdministrative).toBe(true);
+      expect(treesSent(fetchFake)).toEqual([
+        `${UK} tourism`,
+        `${UK} administrative`,
+        `${UK} administrative`,
+      ]);
+    });
+  });
+
+  describe('the comparison covers the whole cached lists, not the page', () => {
+    const ADMIN = childrenBody(4);
+    const serveTree = (tree: unknown) =>
+      serveTrees({ [`${UK} administrative`]: ADMIN, [`${UK} tourism`]: tree });
+
+    it.each([
+      ['limit 1', { limit: 1 }],
+      ['offset 2', { offset: 2 }],
+      ['nameContains', { nameContains: 'child 3' }],
+    ])('marks a matching tree whatever the page (%s)', async (_label, extra) => {
+      serveTree(ADMIN);
+      const data = page(await run({ geonameId: UK, hierarchy: 'tourism', ...extra }));
+      expect(data.sameAsAdministrative).toBe(true);
+      expect(data.notice).toContain(`${FALLBACK} tourism tree`);
+    });
+
+    it('puts the fallback fragment first, ahead of the offset fragment', async () => {
+      serveTree(ADMIN);
+      const data = page(await run({ geonameId: UK, hierarchy: 'tourism', offset: 9 }));
+      expect(data.children).toEqual([]);
+      expectInOrder(data.notice, [
+        `${FALLBACK} tourism tree`,
+        'offset 9 is past the last child (4)',
+      ]);
+    });
+
+    it('puts the fallback fragment ahead of the paging fragment', async () => {
+      serveTree(ADMIN);
+      const data = page(await run({ geonameId: UK, hierarchy: 'tourism', limit: 3 }));
+      expect(data.truncated).toBe(true);
+      expectInOrder(data.notice, [`${FALLBACK} tourism tree`, '1 more child', 'offset 3']);
+    });
+
+    it('does not mark a tree whose page matches but whose full list holds one more child', async () => {
+      serveTree(childrenBody(5));
+      const data = page(
+        await run({ geonameId: UK, hierarchy: 'tourism', nameContains: 'child 1', limit: 1 }),
+      );
+      expect(names(data)).toEqual(['Child 1']);
+      expect(data.sameAsAdministrative).toBe(false);
+      expect(data.notice).toBeUndefined();
+    });
+
+    it('does not mark a tree holding only some of the administrative children', async () => {
+      serveTree(childrenBody(3));
+      expect(page(await run({ geonameId: UK, hierarchy: 'tourism' })).sameAsAdministrative).toBe(
+        false,
+      );
+    });
+
+    it('marks the same children in another order', async () => {
+      serveTree({ ...ADMIN, geonames: ADMIN.geonames.toReversed() });
+      const data = page(await run({ geonameId: UK, hierarchy: 'tourism' }));
+      expect(data.sameAsAdministrative).toBe(true);
+      expect(names(data)).toEqual(['Child 4', 'Child 3', 'Child 2', 'Child 1']);
+    });
+
+    it.each([
+      ['each list repeats a different id', [0, 0, 1], [0, 1, 1]],
+      ['only the tree repeats one', [0, 0, 1], [0, 1]],
+    ])(
+      'does not mark lists that hold the same ids a different number of times (%s)',
+      async (_label, tree, administrative) => {
+        const rowsOf = (indexes: number[]) => ({
+          totalResultsCount: 3,
+          geonames: indexes.map((index) => ADMIN.geonames[index]),
+        });
+        serveTrees({
+          [`${UK} administrative`]: rowsOf(administrative),
+          [`${UK} tourism`]: rowsOf(tree),
+        });
+        expect(page(await run({ geonameId: UK, hierarchy: 'tourism' })).sameAsAdministrative).toBe(
+          false,
+        );
+      },
+    );
+
+    it('compares the upstream totals at the 1,000-row cap', async () => {
+      serveTrees({
+        [`${UK} administrative`]: childrenBody(1000, 1500),
+        [`${UK} tourism`]: childrenBody(1000, 1500),
+        [`${SPAIN} administrative`]: childrenBody(1000, 1500),
+        [`${SPAIN} dependency`]: childrenBody(1000, 1200),
+      });
+      const capped = page(await run({ geonameId: UK, hierarchy: 'tourism', limit: 500 }));
+      expect(capped.sameAsAdministrative).toBe(true);
+      expectInOrder(capped.notice, [
+        `${FALLBACK} tourism tree`,
+        '500 more children',
+        '1,500 children',
+        '1,000 per parent',
+      ]);
+      const differing = page(await run({ geonameId: SPAIN, hierarchy: 'dependency' }));
+      expect(differing.sameAsAdministrative).toBe(false);
+      expect(differing.notice).not.toContain(FALLBACK);
+    });
+  });
+
+  it('compares each parent with its own administrative children while descending', async () => {
+    const fetchFake = serveTrees({
+      ...TREES,
+      '2511174 tourism': EMPTY_GEONAMES_BODY,
+    });
+    const spain = page(await run({ geonameId: SPAIN }));
+    const canaries = spain.children.find((child) => child.name === 'Canary Islands');
+    const islands = page(await run({ geonameId: canaries?.geonameId, hierarchy: 'tourism' }));
+    expect(islands.sameAsAdministrative).toBe(false);
+    const tenerife = islands.children.find((child) => child.name === 'Tenerife');
+    const leaf = page(await run({ geonameId: tenerife?.geonameId, hierarchy: 'tourism' }));
+    expect(leaf).toMatchObject({ found: true, children: [] });
+    expect(leaf).not.toHaveProperty('sameAsAdministrative');
+    const dependency = page(await run({ geonameId: SPAIN, hierarchy: 'dependency' }));
+    expect(dependency.sameAsAdministrative).toBe(true);
+    expect(treesSent(fetchFake)).toEqual([
+      `${SPAIN} administrative`,
+      `${CANARIES} tourism`,
+      `${CANARIES} administrative`,
+      '2511174 tourism',
+      `${SPAIN} dependency`,
+    ]);
+  });
+
+  it.each([
+    ['tourism', 'dependency'],
+    ['dependency', 'tourism'],
+  ])(
+    'says an empty %s tree means no administrative children either, with no comparison request',
+    async (hierarchy, other) => {
+      const fetchFake = serve(EMPTY_GEONAMES_BODY);
+      const result = await run({ geonameId: MALLORCA, hierarchy });
+      const data = page(result);
+      expect(data).toMatchObject({ found: true, children: [], totalCount: 0 });
+      expect(data).not.toHaveProperty('sameAsAdministrative');
+      expect(fetchFake).toHaveBeenCalledTimes(1);
+      expectInOrder(data.notice, [
+        `no children in the ${hierarchy} tree, nor in the administrative tree`,
+        `${FALLBACK} ${hierarchy} tree`,
+        `hierarchy ${other}`,
+        'geonames_search_places',
+      ]);
+      expect(data.notice).not.toContain('hierarchy administrative');
+      expect(textOf(result)).not.toContain('Same as administrative children');
+    },
+  );
 });
 
 describe('the 1,000-row fetch cap', () => {
@@ -686,8 +1052,8 @@ describe('format()', () => {
   });
 
   it('puts the tree in the heading and the next-page line after a truncated page', async () => {
-    serve(CHILDREN_CANARIES_TOURISM_BODY);
-    const result = await run({ geonameId: '2593110', hierarchy: 'tourism', limit: 1 });
+    serveTrees(TREES);
+    const result = await run({ geonameId: CANARIES, hierarchy: 'tourism', limit: 1 });
     expect(textOf(result)).toContain('(tourism tree)');
     expect(textOf(result)).toContain('Next page: offset 1.');
     expect(page(result).nextOffset).toBe(1);

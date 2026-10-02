@@ -1,13 +1,20 @@
 /**
  * @fileoverview Input schemas and local list semantics shared by every GeoNames tool.
  * Normalizations run in the schema, before validation: blanks from form clients
- * become unset, lists accept a comma-separated string, codes are upper-cased, and
- * word enums are lower-cased.
+ * become unset, lists accept a comma-separated string, codes are upper-cased (country
+ * codes mapped to alpha-2), and word enums are lower-cased. Also the checks tools run
+ * before any request: country codes no country has, and feature filters that intersect
+ * to nothing.
  * @module mcp-server/tools/shared-inputs
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { FEATURE_CLASS_CODES } from '@/services/geonames/feature-codes.js';
+import { alpha2For } from '@/services/geonames/country-codes.js';
+import {
+  FEATURE_CLASS_CODES,
+  type FeatureClass,
+  getFeatureCode,
+} from '@/services/geonames/feature-codes.js';
 
 /** Blank when absent, null, or a whitespace-only string. */
 export const isBlank = (value: unknown): boolean =>
@@ -62,10 +69,14 @@ export const lowerCased = <T extends z.ZodType>(schema: T) =>
     schema,
   );
 
-/** `UK` is ISO's exceptionally reserved code for the United Kingdom; GeoNames keys it as `GB`. */
+/**
+ * Upper-cases a country code and maps it to the alpha-2 GeoNames keys countries by: `UK`
+ * (ISO's exceptionally reserved code for the United Kingdom) to `GB`, and an alpha-3 or
+ * three-digit numeric code to its country's alpha-2. A code no country has stays, upper-cased.
+ */
 export const toAlpha2 = (item: string) => {
   const code = item.toUpperCase();
-  return code === 'UK' ? 'GB' : code;
+  return code === 'UK' ? 'GB' : (alpha2For(code) ?? code);
 };
 
 /** Optional caller GeoNames account; never logged, cached, or echoed. */
@@ -127,23 +138,50 @@ export const geonameIdInput = z
     `GeoNames feature id, a positive integer up to ${MAX_GEONAME_ID} such as 5809844 (Seattle), as returned in geonameId by the other geonames tools. A geonames.org/<id> URL is reduced to its id.`,
   );
 
-/** Optional ISO 3166-1 alpha-2 country filter, up to 10 codes. */
+/**
+ * Optional country filter, up to 10 codes, each mapped to alpha-2 by {@link toAlpha2}. A
+ * well-formed alpha-3 or numeric code no country has passes the schema for the tool to
+ * reject; see {@link unknownCountryCodes}.
+ */
 export const countriesInput = listInput(
   z
     .string()
-    .regex(/^[A-Z]{2}$/)
-    .describe('ISO 3166-1 alpha-2 country code.'),
+    .regex(/^([A-Z]{2,3}|\d{3})$/)
+    .describe('ISO 3166-1 alpha-2, alpha-3, or three-digit numeric country code.'),
   { max: 10, normalize: toAlpha2 },
 ).describe(
-  'ISO 3166-1 alpha-2 country codes (US, GB, DE), up to 10, as a list or a comma-separated string. Case-insensitive; UK is accepted for GB.',
+  'ISO 3166-1 country codes, up to 10, as a list or a comma-separated string: alpha-2 (US, GB, DE), alpha-3 (USA, GBR, DEU), or three-digit numeric (840, 826, 276), each sent to GeoNames as alpha-2. Case-insensitive; UK is accepted for GB.',
 );
+
+/** `countries` entries no country has, and the message naming them. */
+export interface UnknownCountryCodes {
+  /** Each entry as normalized, in input order. */
+  countries: string[];
+  message: string;
+}
+
+/**
+ * The `countries` entries {@link toAlpha2} could not map: well-formed alpha-3 or numeric
+ * codes no country has. Returns `undefined` when every entry is alpha-2; an alpha-2 code
+ * GeoNames does not know still goes upstream and matches nothing.
+ */
+export function unknownCountryCodes(
+  countries: readonly string[] | undefined,
+): UnknownCountryCodes | undefined {
+  const unknown = [...new Set(countries?.filter((code) => code.length !== 2))];
+  if (unknown.length === 0) return;
+  return {
+    countries: unknown,
+    message: `No country has the ${unknown.length === 1 ? 'code' : 'codes'} ${unknown.join(', ')}. countries takes ISO 3166-1 codes: alpha-2 (US, GB, DE), alpha-3 (USA), or three-digit numeric (840).`,
+  };
+}
 
 /** Optional feature-class filter, up to all nine classes. */
 export const featureClassesInput = listInput(
   z.enum(FEATURE_CLASS_CODES).describe('One-letter GeoNames feature class.'),
   { max: 9, normalize: (item) => item.toUpperCase() },
 ).describe(
-  'GeoNames feature classes: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. A list or a comma-separated string; case-insensitive.',
+  'GeoNames feature classes: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. A list or a comma-separated string; case-insensitive. With featureCodes too, the two lists intersect: list exactly the classes of those codes, or pass featureCodes alone.',
 );
 
 /** Optional feature-code filter, up to 20 codes; tools check each against the bundled table. */
@@ -154,15 +192,88 @@ export const featureCodesInput = listInput(
     .describe('GeoNames feature code without its class prefix.'),
   { max: 20, normalize: (item) => item.toUpperCase().replace(/^[A-Z]\./, '') },
 ).describe(
-  'GeoNames feature codes (PPLC capital, ADM1 state, MT mountain, AIRP airport), up to 20, as a list or a comma-separated string. Case-insensitive; a class prefix (P.PPLC) is dropped. geonames_list_reference topic feature_codes lists every code.',
+  "GeoNames feature codes (PPLC capital, ADM1 state, MT mountain, AIRP airport), up to 20, as a list or a comma-separated string. Case-insensitive; a class prefix (P.PPLC) is dropped. Each code implies its class; with featureClasses too, the two lists intersect, so featureClasses must list exactly these codes' classes. geonames_list_reference topic feature_codes lists every code.",
 );
 
 /** Optional population tier for populated places. */
 export const citiesInput = blankAsUnset(
   lowerCased(z.enum(['cities1000', 'cities5000', 'cities15000']).optional()),
 ).describe(
-  "Keep only populated places with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. Case-insensitive.",
+  "Keep only populated places (class P) with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. Beside featureClasses or featureCodes, list only class P or class-P codes such as PPLC. Case-insensitive.",
 );
+
+/** Feature-filter entries GeoNames can never match, and the message naming them. */
+export interface FeatureFilterMismatch {
+  /** Listed classes with no listed code, or other than P beside `cities`; each once, in input order. */
+  featureClasses: FeatureClass[];
+  /** Listed codes outside the listed classes, or outside class P beside `cities`; each once, in input order. */
+  featureCodes: string[];
+  message: string;
+}
+
+/** `cities` as the class restriction it is. */
+const CITIES_RESTRICTION = 'cities (class P only)';
+
+/**
+ * GeoNames applies `featureClass`, `featureCode`, and `cities` (class P only) together,
+ * so a code whose class is not listed, a listed class with no listed code, and a class or
+ * code other than P beside `cities` each match nothing. Returns those entries, or
+ * `undefined` when every entry can match. A code the bundled table lacks has no class to
+ * compare and is skipped: tools reject it first as `unknown_feature_code`.
+ */
+export function featureFilterMismatch({
+  featureClasses,
+  featureCodes,
+  cities,
+}: {
+  cities?: string | undefined;
+  featureClasses: readonly FeatureClass[] | undefined;
+  featureCodes: readonly string[] | undefined;
+}): FeatureFilterMismatch | undefined {
+  const classOf = new Map<string, FeatureClass>();
+  for (const code of featureCodes ?? []) {
+    const entry = getFeatureCode(code);
+    if (entry) classOf.set(code, entry.featureClass);
+  }
+  const codeClauses = new Map<string, string>();
+  for (const [code, featureClass] of classOf) {
+    const outside: string[] = [];
+    if (featureClasses !== undefined && !featureClasses.includes(featureClass)) {
+      outside.push('featureClasses');
+    }
+    if (cities !== undefined && featureClass !== 'P') outside.push(CITIES_RESTRICTION);
+    if (outside.length > 0) {
+      codeClauses.set(code, `${code} is class ${featureClass}, outside ${outside.join(' and ')}`);
+    }
+  }
+  const codedClasses = new Set(classOf.values());
+  const classClauses = new Map<FeatureClass, string>();
+  for (const featureClass of featureClasses ?? []) {
+    const faults: string[] = [];
+    if (featureCodes !== undefined && !codedClasses.has(featureClass)) {
+      faults.push('has no code in featureCodes');
+    }
+    if (cities !== undefined && featureClass !== 'P') {
+      faults.push(`is outside ${CITIES_RESTRICTION}`);
+    }
+    if (faults.length > 0) {
+      classClauses.set(featureClass, `class ${featureClass} ${faults.join(' and ')}`);
+    }
+  }
+  if (codeClauses.size === 0 && classClauses.size === 0) return;
+
+  const applied: string[] = [];
+  if (featureClasses !== undefined) applied.push('featureClasses');
+  if (featureCodes !== undefined) applied.push('featureCodes');
+  if (cities !== undefined) applied.push('cities');
+  const filters = new Intl.ListFormat('en', { type: 'conjunction' }).format(applied);
+  const clauses = [...codeClauses.values(), ...classClauses.values()].join('; ');
+  return {
+    featureClasses: [...classClauses.keys()],
+    featureCodes: [...codeClauses.keys()],
+    message: `GeoNames applies ${filters} together, so these entries can never match: ${clauses}.`,
+  };
+}
 
 /** Latitude in decimal degrees. */
 export const latInput = z
