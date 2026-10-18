@@ -1,6 +1,6 @@
 # geonames-mcp-server - Directory Structure
 
-Generated on: 2026-10-01 23:53:38
+Generated on: 2026-10-18 05:32:49
 
 ```text
 geonames-mcp-server/
@@ -130,6 +130,7 @@ geonames-mcp-server/
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/

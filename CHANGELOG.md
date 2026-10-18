@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-10-18
+
+Over-cap limits are clamped with a notice, postal searches page with offset, a full page reports truncation only when more rows exist, enrichment text stays raw in structuredContent, search filters by admin code, and country filters reject codes GeoNames files nothing under.
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-10-01
 
 Feature filters GeoNames can never match now fail before the request, reverse geocoding gains an opt-in coastal buffer, and country filters accept alpha-3 and numeric codes.

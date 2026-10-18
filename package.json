@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/geonames-mcp-server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "mcpName": "io.github.cyanheads/geonames-mcp-server",
   "description": "Search GeoNames places, walk admin hierarchies, reverse geocode, get postal codes and country info via MCP. STDIO or Streamable HTTP.",
   "type": "module",
