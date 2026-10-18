@@ -19,18 +19,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/geonames-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "0.1.2",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "GEONAMES_USERNAME",
@@ -55,19 +45,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/geonames-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "0.1.2",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "GEONAMES_USERNAME",
           "description": "GeoNames account used when a call passes no geonamesUsername. Free accounts must enable free web services on their geonames.org account page.",
