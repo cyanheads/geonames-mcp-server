@@ -1,8 +1,9 @@
 /**
  * @fileoverview Domain types for the GeoNames service: normalized rows with
- * GeoNames' absence placeholders (`population: 0`, `geonameId: 0`, `adminCode1: "00"`,
- * empty strings) dropped, and string numbers parsed. The external-identifier types
- * are also a runtime list, so the parser and the output schema share one source.
+ * GeoNames' absence placeholders (`population: 0`, `geonameId: 0`, `adminCode1: "00"`
+ * with no admin id, empty strings) dropped, and string numbers parsed. The
+ * external-identifier types are also a runtime list, so the parser and the output schema
+ * share one source.
  * @module services/geonames/types
  */
 
@@ -54,11 +55,14 @@ export interface AdminLevel {
   name?: string;
 }
 
-/** Timezone block of a full place record. */
+/**
+ * Timezone block of a full place record. The offsets come from `timezoneId` in the year of
+ * the block's local time, else GeoNames' `gmtOffset`/`dstOffset`.
+ */
 export interface PlaceTimezone {
-  /** UTC offset in hours on 1 July (GeoNames' `dstOffset`). */
+  /** UTC offset in hours on 1 July. */
   dstOffsetInHours?: number;
-  /** UTC offset in hours on 1 January (GeoNames' `gmtOffset`). */
+  /** UTC offset in hours on 1 January. */
   gmtOffsetInHours?: number;
   timezoneId?: string;
 }
@@ -120,21 +124,24 @@ export interface Ocean {
   name: string;
 }
 
-/** `timezoneJSON` result; offshore points carry only the three offsets. */
+/**
+ * `timezoneJSON` result; offshore points carry only the three offsets. The 1 January and 1
+ * July offsets come from `timezoneId` in `localTime`'s year, else GeoNames' `gmtOffset`/
+ * `dstOffset`. With no `timezoneId` both are the standard offset: open water has no DST.
+ */
 export interface TimezoneInfo {
   countryCode?: string;
   countryName?: string;
-  /**
-   * UTC offset in hours on 1 July (GeoNames' `dstOffset`). With no `timezoneId`, GeoNames'
-   * `dstOffset: 0` is a placeholder and the standard offset stands in: open water has no DST.
-   */
+  /** UTC offset in hours on 1 July. */
   dstOffsetInHours: number;
-  /** UTC offset in hours on 1 January (GeoNames' `gmtOffset`). */
+  /** UTC offset in hours on 1 January. */
   gmtOffsetInHours: number;
   /** GeoNames' local `YYYY-MM-DD HH:mm`. */
   localTime?: string;
   rawOffsetInHours: number;
+  /** On `localTime`'s date; absent offshore, in polar day or night, and when no pair falls on it. */
   sunrise?: string;
+  /** The sunset of the same pair. */
   sunset?: string;
   timezoneId?: string;
 }
@@ -196,6 +203,11 @@ export type CitiesTier = 'cities1000' | 'cities5000' | 'cities15000';
  * Like every parameter bag below, an optional field may also be passed as `undefined`.
  */
 export interface SearchParams {
+  /** GeoNames admin codes, sent verbatim (zero padding is significant). */
+  adminCode1?: string | undefined;
+  adminCode2?: string | undefined;
+  adminCode3?: string | undefined;
+  adminCode4?: string | undefined;
   boundingBox?: BoundingBox | undefined;
   cities?: CitiesTier | undefined;
   countries?: readonly string[] | undefined;
@@ -205,6 +217,7 @@ export interface SearchParams {
   /** Applied only with `query`. */
   match?: SearchMatch | undefined;
   offset: number;
+  /** Sent as `orderby` whenever set; unset leaves GeoNames' own order. */
   orderBy?: 'population' | 'relevance' | undefined;
   query?: string | undefined;
 }
@@ -221,9 +234,10 @@ export interface SearchResult {
  */
 export type ChildHierarchy = 'administrative' | 'dependency' | 'tourism';
 
-/** Shared parameters of the two nearby endpoints. */
+/** Shared parameters of the two nearby endpoints and the nearby postal endpoint. */
 export interface NearbyParams {
   lat: number;
+  /** Rows to request, sent as `maxRows`; the tools ask for one past the rows they show. */
   limit: number;
   lng: number;
   radiusKm: number;
@@ -243,7 +257,10 @@ export interface NearbyFeaturesParams extends NearbyParams {
 /** `postalCodeSearchJSON` parameters (code or place name). */
 export interface PostalSearchParams {
   countries?: readonly string[] | undefined;
+  /** Rows to request, sent as `maxRows`; the tool asks for one past the rows it shows. */
   limit: number;
+  /** Rows to skip, sent as `startRow` on every call, so each offset has its own cache key. */
+  offset: number;
   placeName?: string | undefined;
   postalCode?: string | undefined;
 }

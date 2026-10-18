@@ -1,13 +1,14 @@
 /**
  * @fileoverview The bundled ISO 3166-1 code table: the whole set (row count, uniqueness,
  * shape, Kosovo's missing numeric code), every alpha-3 and numeric code mapping to its
- * alpha-2 through the shared normalizer, and agreement with the country fixtures.
+ * alpha-2 through the shared normalizer, the codes GeoNames files features under (the
+ * table plus three retired codes), and agreement with the country fixtures.
  * @module tests/shared/country-codes.test
  */
 
 import { describe, expect, it } from 'vitest';
 import { toAlpha2 } from '@/mcp-server/tools/shared-inputs.js';
-import { alpha2For, COUNTRY_CODES } from '@/services/geonames/country-codes.js';
+import { alpha2For, COUNTRY_CODES, isFiledCountryCode } from '@/services/geonames/country-codes.js';
 import { COUNTRY_TABLE_WITH_KOSOVO_BODY } from '../fixtures/geonames-upstream.js';
 
 const unique = (values: readonly string[]) => new Set(values).size === values.length;
@@ -67,6 +68,25 @@ describe('COUNTRY_CODES', () => {
   it.each(['ZZZ', '999', 'UK', 'U', 'USAA', '84', ''])('maps nothing for %j', (code) => {
     expect(alpha2For(code)).toBeUndefined();
   });
+
+  it('knows GeoNames files features under every alpha-2 in the table', () => {
+    for (const code of alpha2) expect(isFiledCountryCode(code), code).toBe(true);
+  });
+
+  it.each(['AN', 'CS', 'YU'])(
+    'knows GeoNames files features under the retired %s, which the country table leaves out',
+    (code) => {
+      expect(isFiledCountryCode(code)).toBe(true);
+      expect(alpha2).not.toContain(code);
+    },
+  );
+
+  it.each(['EL', 'XX', 'EU', 'UK', 'SU', 'an', 'us', 'USA', 'ANT', '840', 'U', ''])(
+    'knows GeoNames files no feature under %j',
+    (code) => {
+      expect(isFiledCountryCode(code)).toBe(false);
+    },
+  );
 
   it('agrees with the countryInfoJSON fixture rows', () => {
     const rows = COUNTRY_TABLE_WITH_KOSOVO_BODY.geonames.filter((row) => row !== undefined);

@@ -257,26 +257,41 @@ describe('input normalization', () => {
     expect(getChildrenTool.description).not.toContain('Only admin divisions and populated places');
   });
 
-  it.each([0, -1, 501, 1.5, 'many', null])('rejects limit %j', async (limit) => {
-    const error = errorOf(await run({ geonameId: US, limit }));
-    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
-  });
+  it.each([0, -1, 1001, 1.5, 'many', true, { value: 5 }])(
+    'rejects limit %j before any request',
+    async (limit) => {
+      const fetchFake = serve();
+      const error = errorOf(await run({ geonameId: US, limit }));
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([-1, 0.5, 'next'])('rejects offset %j', async (offset) => {
     const error = errorOf(await run({ geonameId: US, offset }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
   });
 
-  it('accepts limit 1 and 500', async () => {
+  it('accepts limit 1, 500, and 1000, applying at most 500', async () => {
     expect(page(await run({ geonameId: US, limit: 1 })).cap).toBe(1);
     expect(page(await run({ geonameId: US, limit: 500 })).cap).toBe(500);
+    expect(page(await run({ geonameId: US, limit: 1000 })).cap).toBe(500);
   });
 
-  it.each(['', '  '])('reads a blank limit and offset (%j) as unset', async (blank) => {
-    const result = page(await run({ geonameId: US, limit: blank, offset: blank }));
-    expect(result.cap).toBe(100);
-    expect(result.children).toHaveLength(6);
+  it('describes the 1,000 ceiling, the 500 cap, and the default', () => {
+    expect(getChildrenTool.input.shape.limit.description).toBe(
+      'Maximum entries to return, 1 to 1,000. This tool returns at most 500 per call: a larger limit is held to 500, and the notice says so when more entries remain. Default 100.',
+    );
   });
+
+  it.each(['', '  ', null])(
+    'reads a blank or null limit and offset (%j) as unset',
+    async (blank) => {
+      const result = page(await run({ geonameId: US, limit: blank, offset: blank }));
+      expect(result.cap).toBe(100);
+      expect(result.children).toHaveLength(6);
+    },
+  );
 
   it.each(['', ' \t '])('reads a blank nameContains (%j) as unset', async (blank) => {
     const result = page(await run({ geonameId: US, nameContains: blank }));
@@ -495,6 +510,98 @@ describe('paging', () => {
   });
 });
 
+describe('a limit above the 500 cap', () => {
+  const CLAMP = (requested: number) =>
+    `limit ${requested} was capped at 500, the most this tool returns per call.`;
+
+  it.each([501, 1000])(
+    'holds limit %i to 500, returns cap 500, and names the clamp before the next offset',
+    async (limit) => {
+      serve(childrenBody(853));
+      const result = await run({ geonameId: US, limit });
+      const data = page(result);
+      expect(data.children).toHaveLength(500);
+      expect(data.children.at(-1)?.name).toBe('Child 500');
+      expect(data).toMatchObject({
+        cap: 500,
+        shown: 500,
+        totalCount: 853,
+        truncated: true,
+        nextOffset: 500,
+        notice: `${CLAMP(limit)} 353 more children; call again with offset 500.`,
+      });
+      const text = allText(result);
+      expect(text.slice(text.lastIndexOf('\n'))).toBe(
+        `\n> ${CLAMP(limit)} 353 more children; call again with offset 500.`,
+      );
+    },
+  );
+
+  it('applies limit 500 as given, with no clamp fragment', async () => {
+    serve(childrenBody(853));
+    const result = page(await run({ geonameId: US, limit: 500 }));
+    expect(result).toMatchObject({ cap: 500, shown: 500, truncated: true });
+    expect(result.notice).toBe('353 more children; call again with offset 500.');
+  });
+
+  it('walks a clamped list in two pages, the last with no clamp fragment', async () => {
+    serve(childrenBody(853));
+    const first = page(await run({ geonameId: US, limit: 1000 }));
+    const last = page(await run({ geonameId: US, limit: 1000, offset: first.nextOffset }));
+    expect(last.children).toHaveLength(353);
+    expect([...first.children, ...last.children].map((child) => child.name)).toEqual(
+      Array.from({ length: 853 }, (_, index) => `Child ${index + 1}`),
+    );
+    expect(last).toMatchObject({ cap: 500, shown: 353, truncated: false });
+    expect(last).not.toHaveProperty('nextOffset');
+    expect(last.notice).toBeUndefined();
+  });
+
+  it('says nothing of the clamp when every child fits', async () => {
+    serve();
+    const result = await run({ geonameId: US, limit: 1000 });
+    expect(page(result)).toMatchObject({ cap: 500, shown: 6, truncated: false });
+    expect(page(result).notice).toBeUndefined();
+    expect(allText(result)).not.toContain('capped');
+  });
+
+  it('says nothing of the clamp on a leaf, a no-match, or a past-the-end page', async () => {
+    serve(EMPTY_GEONAMES_BODY);
+    const leaf = page(await run({ geonameId: US, limit: 1000 }));
+    expect(leaf.notice).toBe(
+      'This feature has no children in the administrative tree. Try hierarchy tourism or dependency, or search inside it with geonames_search_places and a boundingBox.',
+    );
+    serve(childrenBody(853));
+    const none = page(await run({ geonameId: US, nameContains: 'zzzqq', limit: 1000 }));
+    expect(none.notice).toBe(
+      'No child name contains "zzzqq" among 853; call again without nameContains to browse them all.',
+    );
+    const past = page(await run({ geonameId: US, limit: 1000, offset: 900 }));
+    expect(past.notice).toBe(
+      'offset 900 is past the last child (853); call again with a smaller offset.',
+    );
+    for (const result of [leaf, none, past]) expect(result.cap).toBe(500);
+  });
+
+  it('puts the clamp after the fallback fragment and ahead of the paging and fetch-cap fragments', async () => {
+    serveTrees({
+      [`${UK} tourism`]: childrenBody(600, 1500),
+      [`${UK} administrative`]: childrenBody(600, 1500),
+    });
+    const result = await run({ geonameId: UK, hierarchy: 'tourism', limit: 700 });
+    expect(page(result)).toMatchObject({
+      sameAsAdministrative: true,
+      cap: 500,
+      shown: 500,
+      nextOffset: 500,
+    });
+    const notice = `These are the same children as the administrative tree's. GeoNames answers with the administrative children when a feature has no tourism tree, so this feature most likely has none; a real tourism tree can also match its administrative children. ${CLAMP(700)} 100 more children; call again with offset 500. GeoNames lists 1,500 children but returns at most 1,000 per parent; narrow with geonames_search_places using featureCodes and a boundingBox.`;
+    expect(page(result).notice).toBe(notice);
+    const text = allText(result);
+    expect(text.slice(text.lastIndexOf('\n'))).toBe(`\n> ${notice}`);
+  });
+});
+
 describe('nameContains', () => {
   it('matches every word against name or toponym name, ignoring case, accents, and punctuation', async () => {
     serve({
@@ -530,16 +637,22 @@ describe('nameContains', () => {
     expectInOrder(result.notice, ['"zzzqq"', 'among 6', 'without nameContains']);
   });
 
-  it('echoes the filter into the notice inline and markdown-inert', async () => {
+  it('carries the filter raw in structuredContent and markdown-inert in content[]', async () => {
     serve();
-    const result = page(
-      await run({ geonameId: US, nameContains: 'q[x](http://e.test) <b>\r\n## Heading' }),
+    const hostile = 'q[x](http://e.test) <b>\r\n## Heading\n> quote';
+    const result = await run({ geonameId: US, nameContains: hostile });
+    expect(page(result).notice).toBe(
+      `No child name contains "${hostile}" among 6; call again without nameContains to browse them all.`,
     );
-    expectInOrder(result.notice, [
-      'q\\[x\\](http\\[:\\]//e.test) &lt;b&gt;  ## Heading',
-      'without nameContains',
+    const text = allText(result);
+    expect(text.slice(text.lastIndexOf('\n'))).toBe(
+      '\n> No child name contains "q\\[x\\](http\\[:\\]//e.test) &lt;b&gt;  ## Heading &gt; quote" among 6; call again without nameContains to browse them all.',
+    );
+    expect(headingLines(text)).toEqual([
+      `## GeoNames children of geonameId ${US} (administrative tree)`,
     ]);
-    expect(result.notice).not.toMatch(/[\r\n]/);
+    expect(text.split('\n').filter((line) => line.startsWith('>'))).toHaveLength(1);
+    expect(text).not.toContain('<b>');
   });
 });
 
@@ -1025,6 +1138,34 @@ describe('enrichment on the production output path', () => {
       notice: expect.stringContaining('20 more children'),
     });
   });
+
+  it.each([
+    ['zero-result', EMPTY_GEONAMES_BODY, { totalCount: 0, shown: 0, truncated: false }],
+    ['under-cap', CHILDREN_US_STATES_BODY, { totalCount: 6, shown: 6, truncated: false }],
+    ['clamped', childrenBody(853), { totalCount: 853, shown: 500, truncated: true }],
+  ])('writes cap 500 for limit 1000 on the %s page', async (_page, body, fields) => {
+    serve(body);
+    const result = await run({ geonameId: US, limit: 1000 });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({ ...fields, cap: 500 });
+    expect(allText(result)).toMatch(/\n\*\*cap:\*\* 500(\n|$)/);
+  });
+
+  it.each([
+    ['a leaf', EMPTY_GEONAMES_BODY, {}],
+    ['a truncated page past the 1,000-row fetch cap', childrenBody(4, 1500), { limit: 3 }],
+    ['an offset past the end', childrenBody(5), { offset: 5 }],
+  ])(
+    'prints its own notice text for %s unchanged in the content[] trailer',
+    async (_page, body, input) => {
+      serve(body);
+      const result = await run({ geonameId: US, ...input });
+      const { notice } = page(result);
+      expect(notice).toBeDefined();
+      const text = allText(result);
+      expect(text.slice(text.lastIndexOf('\n'))).toBe(`\n> ${notice}`);
+    },
+  );
 });
 
 describe('format()', () => {
@@ -1346,5 +1487,37 @@ describe('upstream failure classes', () => {
       { context: { signal: controller.signal } },
     );
     expect(errorOf(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+  });
+
+  it('cancels one of two identical calls while the other is served from the one request', async () => {
+    const gates: (() => void)[] = [];
+    const fetchFake = installService({
+      childrenJSON: (_url, init) =>
+        new Promise<Response>((resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+          gates.push(() => resolve(jsonResponse(CHILDREN_US_STATES_BODY)));
+        }),
+    });
+    const controller = new AbortController();
+    const cancelled = runToolContract(
+      getChildrenTool,
+      { geonameId: US },
+      { context: { signal: controller.signal } },
+    );
+    const served = run({ geonameId: US });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort(new Error('client went away'));
+    const cancelledResult = await cancelled;
+    for (const open of gates.splice(0)) open();
+    const servedResult = await served;
+
+    const error = errorOf(cancelledResult);
+    expect(error.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(error.message).toBe('client went away');
+    expect(textOf(cancelledResult)).toBe('Error: client went away');
+    expect(page(servedResult).totalCount).toBe(6);
+    expect(textOf(servedResult)).toContain('Washington');
+    expect(fetchFake).toHaveBeenCalledTimes(1);
+    expect(fetchFake.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
   });
 });

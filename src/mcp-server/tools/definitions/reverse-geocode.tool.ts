@@ -12,6 +12,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   blankAsUnset,
   citiesInput,
+  clampLimit,
   featureClassesInput,
   featureCodesInput,
   featureFilterMismatch,
@@ -23,7 +24,7 @@ import {
 import { getFeatureCode } from '@/services/geonames/feature-codes.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import type { Ocean, Subdivision, TimezoneInfo, Toponym } from '@/services/geonames/types.js';
-import { inlineText, tableCell } from '@/utils/inline-text.js';
+import { inlineText, renderNotice, tableCell } from '@/utils/inline-text.js';
 
 /** Wall-clock budget for the whole call, inside a 60 s client timeout. */
 const TOOL_BUDGET_MS = 30_000;
@@ -31,8 +32,11 @@ const TOOL_BUDGET_MS = 30_000;
 /** Ceiling on the ocean follow-up's ladder; it also gets no more than what the budget has left. */
 const OCEAN_BUDGET_MS = 10_000;
 
-/** The most nearby rows one call returns. */
+/** The most nearby rows one call returns; a larger nearbyLimit is held to it. */
 const MAX_NEARBY = 50;
+
+/** The largest nearbyLimit accepted; anything above it fails validation as absurd. */
+const NEARBY_LIMIT_CEILING = 1000;
 
 /** GeoNames' free-tier ceiling on the nearby radius (status 24 beyond). */
 const MAX_RADIUS_KM = 300;
@@ -77,8 +81,10 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
   input: z.object({
     lat: latInput,
     lng: lngInput,
-    nearbyLimit: blankAsUnset(z.number().int().min(0).max(MAX_NEARBY).default(5)).describe(
-      'How many nearest places or features to list, 0 to 50. Default 5. 0 skips the nearby lookup and its 3 or 4 credits.',
+    nearbyLimit: blankAsUnset(
+      z.number().int().min(0).max(NEARBY_LIMIT_CEILING).default(5),
+    ).describe(
+      'How many nearest places or features to list, 0 to 1,000. This tool returns at most 50 per call: a larger nearbyLimit is held to 50, and the notice says so when more lie within the radius. Default 5. 0 skips the nearby lookup and its 3 or 4 credits.',
     ),
     radiusKm: blankAsUnset(z.number().positive().max(MAX_RADIUS_KM).default(20)).describe(
       "Radius in kilometres for the nearby lookup, above 0 and at most 300 (GeoNames' free-tier limit). Default 20.",
@@ -87,10 +93,10 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       "Keep only nearby populated places with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. Not combinable with featureClasses or featureCodes.",
     ),
     featureClasses: featureClassesInput.describe(
-      'List the nearest features of these GeoNames classes instead of populated places: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. A list or a comma-separated string; case-insensitive. With featureCodes too, the two lists intersect: list exactly the classes of those codes, or pass featureCodes alone. Not combinable with cities.',
+      'List the nearest features of these GeoNames classes instead of populated places: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. With featureCodes too, the two lists intersect: list exactly the classes of those codes, or pass featureCodes alone. Not combinable with cities.',
     ),
     featureCodes: featureCodesInput.describe(
-      "List the nearest features with these GeoNames codes instead of populated places (MT mountain, PK peak, LK lake, AIRP airport), up to 20, as a list or a comma-separated string. Case-insensitive; a class prefix (T.MT) is dropped. Each code implies its class; with featureClasses too, the two lists intersect, so featureClasses must list exactly these codes' classes. geonames_list_reference topic feature_codes lists every code. Not combinable with cities.",
+      "List the nearest features with these GeoNames codes instead of populated places (MT mountain, PK peak, LK lake, AIRP airport), up to 20, as a list. Each code implies its class; with featureClasses too, the two lists intersect, so featureClasses must list exactly these codes' classes. geonames_list_reference topic feature_codes lists every code. Not combinable with cities.",
     ),
     includeTimezone: blankAsUnset(z.boolean().default(false)).describe(
       'Also return the timezone: IANA id, UTC offsets, local time, sunrise, and sunset (1 more credit). Default false.',
@@ -127,7 +133,12 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
         z
           .object({
             level: z.number().describe('Admin level: 1 for the first-order division, up to 5.'),
-            code: z.string().optional().describe('Admin code at this level.'),
+            code: z
+              .string()
+              .optional()
+              .describe(
+                "GeoNames admin code at this level. At levels 1 to 4, pass it as written to geonames_search_places as that level's adminCode (adminCode1 to adminCode4), with the level 1 code as adminCode1 and country.countryCode in countries, to search inside the division; level 5 has no search filter.",
+              ),
             name: z.string().optional().describe('Name of the division.'),
             geonameId: z
               .number()
@@ -229,11 +240,13 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
           .optional()
           .describe('ISO 3166-1 alpha-2 code of the timezone country. Absent offshore.'),
         rawOffsetInHours: z.number().describe('Standard UTC offset in hours, without DST.'),
-        gmtOffsetInHours: z.number().describe('UTC offset in hours on 1 January.'),
+        gmtOffsetInHours: z
+          .number()
+          .describe('UTC offset in hours on 1 January of the current local year.'),
         dstOffsetInHours: z
           .number()
           .describe(
-            "UTC offset in hours on 1 July. Without a timezoneId the offsets are GeoNames' open-water estimate, which has no DST, so this equals rawOffsetInHours.",
+            "UTC offset in hours on 1 July of the current local year. Without a timezoneId the offsets are GeoNames' open-water estimate, which has no DST, so both equal rawOffsetInHours.",
           ),
         localTime: z
           .string()
@@ -242,11 +255,15 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
         sunrise: z
           .string()
           .optional()
-          .describe("Today's local sunrise, YYYY-MM-DD HH:mm. Absent offshore."),
+          .describe(
+            "Local sunrise on localTime's date, YYYY-MM-DD HH:mm. Absent offshore, in polar day or night, and when GeoNames has none for that date.",
+          ),
         sunset: z
           .string()
           .optional()
-          .describe("Today's local sunset, YYYY-MM-DD HH:mm. Absent offshore."),
+          .describe(
+            'Local sunset of the same day as sunrise, YYYY-MM-DD HH:mm; it can fall after midnight. Absent offshore, in polar day or night, and when GeoNames has none for that date.',
+          ),
       })
       .optional()
       .describe('The timezone at the point; present only with includeTimezone.'),
@@ -254,16 +271,19 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
   enrichment: {
     truncated: z
       .boolean()
-      .describe('True when nearby is full at nearbyLimit, so more may lie within the radius.'),
+      .describe('True when more places or features lie within the radius than nearby holds.'),
     shown: z.number().describe('Nearby places or features returned.'),
-    cap: z.number().describe('The nearbyLimit that was applied.'),
+    cap: z
+      .number()
+      .describe('The nearbyLimit applied: nearbyLimit as given, or 50 when it asked for more.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when the point is offshore or unmapped, its country was matched within coastalBufferKm, nothing is nearby, nearby is full, or no IANA timezone covers it.',
+        'Guidance when the point is offshore or unmapped, its country was matched within coastalBufferKm, nothing is nearby, more lie within the radius than nearby holds (naming a nearbyLimit held to 50), or no IANA timezone covers it.',
       ),
   },
+  enrichmentTrailer: { notice: { render: renderNotice } },
   errors: [
     {
       reason: 'unknown_feature_code',
@@ -337,17 +357,10 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
 
   async handler(input, ctx) {
     const startedAt = Date.now();
-    ctx.enrich({ truncated: false, shown: 0, cap: input.nearbyLimit });
-    const {
-      lat,
-      lng,
-      nearbyLimit,
-      radiusKm,
-      cities,
-      featureClasses,
-      featureCodes,
-      coastalBufferKm,
-    } = input;
+    const clamp = clampLimit(input.nearbyLimit, MAX_NEARBY, 'nearbyLimit');
+    const nearbyLimit = clamp.applied;
+    ctx.enrich({ truncated: false, shown: 0, cap: nearbyLimit });
+    const { lat, lng, radiusKm, cities, featureClasses, featureCodes, coastalBufferKm } = input;
     if (cities !== undefined && (featureClasses !== undefined || featureCodes !== undefined)) {
       throw ctx.fail(
         'conflicting_filters',
@@ -389,7 +402,8 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       });
       return ocean === undefined ? {} : { ocean };
     };
-    const nearbyParams = { lat, lng, radiusKm, limit: nearbyLimit };
+    /** One row past nearbyLimit: the extra row is what says more lie within the radius. */
+    const nearbyParams = { lat, lng, radiusKm, limit: nearbyLimit + 1 };
     let nearbyLeg: Promise<Toponym[]> = Promise.resolve([]);
     if (nearbyKind === 'populated_places') {
       nearbyLeg = service.nearbyPlaces({ ...nearbyParams, cities }, account, ctx);
@@ -400,11 +414,12 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
         ctx,
       );
     }
-    const [{ subdivision, ocean }, nearby, timezone] = await Promise.all([
+    const [{ subdivision, ocean }, nearbyRows, timezone] = await Promise.all([
       locate(),
       nearbyLeg,
       input.includeTimezone ? service.timezone(lat, lng, account, ctx) : undefined,
     ]);
+    const nearby = nearbyRows.slice(0, nearbyLimit);
 
     const shown = nearby.length;
     ctx.enrich({ shown });
@@ -412,8 +427,8 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
     if (subdivision === undefined && ocean !== undefined) {
       fragments.push(
         coastalBufferKm > 0
-          ? `No country lies within ${coastalBufferKm} km of this point; it lies in ${inlineText(ocean.name)}.`
-          : `No country contains this point; it lies in ${inlineText(ocean.name)}. A harbor or shoreline point just outside a country's outline resolves to the water body: set coastalBufferKm (up to ${MAX_COASTAL_BUFFER_KM}) to match the nearest country within that distance.`,
+          ? `No country lies within ${coastalBufferKm} km of this point; it lies in ${ocean.name}.`
+          : `No country contains this point; it lies in ${ocean.name}. A harbor or shoreline point just outside a country's outline resolves to the water body: set coastalBufferKm (up to ${MAX_COASTAL_BUFFER_KM}) to match the nearest country within that distance.`,
       );
     } else if (subdivision === undefined) {
       const noCountry =
@@ -430,10 +445,7 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       }
     } else if (subdivision.country?.distanceInKm !== undefined) {
       const { countryCode, countryName, distanceInKm } = subdivision.country;
-      const label =
-        countryName === undefined
-          ? inlineText(countryCode)
-          : `${inlineText(countryName)} (${inlineText(countryCode)})`;
+      const label = countryName === undefined ? countryCode : `${countryName} (${countryCode})`;
       fragments.push(
         `No country contains this point exactly; ${label} was matched ${distanceInKm} km away, within the ${coastalBufferKm} km coastal buffer.`,
       );
@@ -457,12 +469,13 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
         `No feature ${filter} within ${radiusKm} km; ${widen} or widen the feature filter (geonames_list_reference topic feature_codes).`,
       );
     }
-    if (shown > 0 && shown === nearbyLimit) {
+    if (nearbyRows.length > nearbyLimit) {
       ctx.enrich.truncated({ shown, cap: nearbyLimit });
+      if (clamp.fragment !== undefined) fragments.push(clamp.fragment);
       fragments.push(
         nearbyLimit < MAX_NEARBY
-          ? `Only the nearest ${nearbyLimit} are listed, and more may lie within ${radiusKm} km; raise nearbyLimit (max ${MAX_NEARBY}) to see them.`
-          : `Only the nearest ${MAX_NEARBY} are listed, the most one call returns, and more may lie within ${radiusKm} km; list the rest with geonames_search_places and a boundingBox.`,
+          ? `Only the nearest ${nearbyLimit} are listed, and more lie within ${radiusKm} km; raise nearbyLimit (max ${MAX_NEARBY}) to see them.`
+          : `Only the nearest ${MAX_NEARBY} are listed, ${clamp.fragment === undefined ? 'the most one call returns, ' : ''}and more lie within ${radiusKm} km; list the rest with geonames_search_places and a boundingBox.`,
       );
     }
     if (input.includeTimezone && timezone?.timezoneId === undefined) {

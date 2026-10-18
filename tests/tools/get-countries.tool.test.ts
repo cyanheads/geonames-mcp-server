@@ -157,17 +157,27 @@ describe('code filter', () => {
     expect(mixed.notFound).toEqual(['XX']);
   });
 
-  it('accepts fifty codes and rejects fifty-one', async () => {
-    serve();
-    const codes = Array.from(
-      { length: 50 },
-      (_, index) => `A${String.fromCharCode(65 + (index % 26))}`,
+  it('accepts 250 codes and rejects 251 before any request', async () => {
+    const fetchFake = serve();
+    const pairs = Array.from(
+      { length: 26 * 26 },
+      (_, index) =>
+        `${String.fromCharCode(65 + Math.floor(index / 26))}${String.fromCharCode(65 + (index % 26))}`,
     );
-    const page = successOf<Page>(await run({ countries: codes }));
-    expect(page.countries).toHaveLength(1);
+    const codes = [...ALL, ...pairs.filter((code) => !ALL.includes(code))].slice(0, 250);
+    expect(new Set(codes).size).toBe(250);
     const error = errorOf(await run({ countries: [...codes, 'ZZ'] }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(fetchFake).not.toHaveBeenCalled();
     expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['countries'] })]);
+    const page = successOf<Page>(await run({ countries: codes }));
+    expect(codesOf(page)).toEqual(ALL);
+    expect(page.notFound).toHaveLength(245);
+    expect(fetchFake).toHaveBeenCalledTimes(1);
+  });
+
+  it('describes the 250-code bound', () => {
+    expect(getCountriesTool.input.shape.countries.description).toContain('up to 250, as a list');
   });
 
   it.each(['U', 'USAA', '84', '8400', 'U1', 'U-S'])('rejects the code %j', async (code) => {
@@ -306,8 +316,19 @@ describe('Kosovo, which has no ISO numeric code', () => {
 });
 
 describe('paging and notices', () => {
-  it.each([[0], [251], [-1], [1.5], ['all']])('rejects limit %j', async (limit) => {
-    expect(errorOf(await run({ limit })).code).toBe(JsonRpcErrorCode.InvalidParams);
+  it.each([[0], [1001], [-1], [1.5], ['all'], [true], [{ value: 5 }]])(
+    'rejects limit %j before any request',
+    async (limit) => {
+      const fetchFake = serve();
+      expect(errorOf(await run({ limit })).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('describes the 1,000 ceiling, the 250 cap, and the default', () => {
+    expect(getCountriesTool.input.shape.limit.description).toBe(
+      'Maximum entries to return, 1 to 1,000. This tool returns at most 250 per call: a larger limit is held to 250, and the notice says so when more entries remain. Default 50.',
+    );
   });
 
   it.each([[-1], [0.5], ['next']])('rejects offset %j', async (offset) => {
@@ -405,6 +426,84 @@ describe('paging and notices', () => {
     const page = successOf<Page>(await run({ countries: 'XX' }));
     expect(page).toMatchObject({ countries: [], notFound: ['XX'], totalCount: 0 });
     expect(page.notice).toContain('No country matched');
+  });
+});
+
+describe('a limit above the 250 cap', () => {
+  const CLAMP = (requested: number) =>
+    `limit ${requested} was capped at 250, the most this tool returns per call.`;
+
+  /** A country table of `count` rows; GeoNames' holds 250 today. */
+  const countryTable = (count: number) => ({
+    geonames: Array.from({ length: count }, (_, index) => ({
+      ...COUNTRY_SPARSE_BODY.geonames[0],
+      countryCode: `Q${index + 1}`,
+      isoAlpha3: `Q${index + 1}X`,
+      countryName: `Country ${index + 1}`,
+      geonameId: 9_000_000 + index,
+    })),
+  });
+
+  it('returns a whole 250-row table for limit 1000, with cap 250 and no clamp fragment', async () => {
+    serve(countryTable(250));
+    const result = await run({ limit: 1000 });
+    expect(successOf<Page>(result)).toMatchObject({ cap: 250, shown: 250, truncated: false });
+    expect(successOf<Page>(result)).not.toHaveProperty('nextOffset');
+    expect(successOf<Page>(result)).not.toHaveProperty('notice');
+    expect(allText(result)).toMatch(/\n\*\*cap:\*\* 250$/);
+    expect(allText(result)).not.toContain('capped');
+  });
+
+  it.each([251, 1000])(
+    'holds limit %i to 250 and names the clamp before the next offset when the table holds more',
+    async (limit) => {
+      serve(countryTable(251));
+      const result = await run({ limit });
+      const page = successOf<Page>(result);
+      expect(page.countries).toHaveLength(250);
+      expect(page.countries.at(-1)?.countryCode).toBe('Q250');
+      expect(page).toMatchObject({
+        cap: 250,
+        shown: 250,
+        totalCount: 251,
+        truncated: true,
+        nextOffset: 250,
+        notice: `${CLAMP(limit)} 1 more country; call again with offset 250.`,
+      });
+      const text = allText(result);
+      expect(text.slice(text.lastIndexOf('\n'))).toBe(
+        `\n> ${CLAMP(limit)} 1 more country; call again with offset 250.`,
+      );
+    },
+  );
+
+  it('applies limit 250 as given, with no clamp fragment', async () => {
+    serve(countryTable(251));
+    const page = successOf<Page>(await run({ limit: 250 }));
+    expect(page).toMatchObject({ cap: 250, shown: 250, truncated: true });
+    expect(page.notice).toBe('1 more country; call again with offset 250.');
+  });
+
+  it('ends a clamped table on its second page, with no clamp fragment', async () => {
+    serve(countryTable(251));
+    const last = successOf<Page>(await run({ limit: 1000, offset: 250 }));
+    expect(codesOf(last)).toEqual(['Q251']);
+    expect(last).toMatchObject({ cap: 250, shown: 1, truncated: false });
+    expect(last).not.toHaveProperty('notice');
+  });
+
+  it('says nothing of the clamp on a no-match or a past-the-end page', async () => {
+    serve();
+    const none = successOf<Page>(await run({ nameContains: 'Atlantis', limit: 1000 }));
+    expect(none).toMatchObject({ cap: 250, shown: 0 });
+    expect(none.notice).toBe(
+      'No country matched; call geonames_get_countries with no filters to list all 5.',
+    );
+    const past = successOf<Page>(await run({ continent: 'EU', offset: 9, limit: 1000 }));
+    expect(past).toMatchObject({ cap: 250, shown: 0 });
+    expect(past.notice).toBe(
+      'offset 9 is past the last country (3); call again with a smaller offset.',
+    );
   });
 });
 
@@ -576,6 +675,17 @@ describe('enrichment on the production output path', () => {
       cap: 50,
     });
   });
+
+  it.each([
+    ['zero-result', { nameContains: 'Atlantis' }, { totalCount: 0, shown: 0, truncated: false }],
+    ['under-cap', {}, { totalCount: 5, shown: 5, truncated: false }],
+  ])('writes cap 250 for limit 1000 on the %s page', async (_page, input, fields) => {
+    serve();
+    const result = await run({ ...input, limit: 1000 });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({ ...fields, cap: 250 });
+    expect(allText(result)).toMatch(/\n\*\*cap:\*\* 250(\n|$)/);
+  });
 });
 
 describe('format()', () => {
@@ -607,6 +717,28 @@ describe('format()', () => {
     expect(rows[2]).toBe(
       '| AQ / ATA / 010 / AY | Antarctica | 6697173 | Not available | Antarctica (AN) | Not available | 14,000,000 | Not available | Not available | Not available | -60.5 / -90 / 180 / -180 |',
     );
+  });
+
+  it('prints a postal format and a name as written in their cells, since a table cell opens no block', async () => {
+    serve({
+      geonames: [
+        COUNTRY_TABLE_BODY.geonames[1],
+        {
+          ...COUNTRY_TABLE_BODY.geonames[2],
+          countryName: '4. Wiener Gemeindebezirk',
+          postalCodeFormat: '### ##',
+        },
+      ],
+    });
+    const result = await run({});
+    expect(successOf<Page>(result).countries.map((country) => country.postalCodeFormat)).toEqual([
+      '#####',
+      '### ##',
+    ]);
+    const rows = tableRows(textOf(result));
+    expect(rows[2]).toContain(' | EUR | ##### | ');
+    expect(rows[3]).toContain('| FR / FRA / 250 / FR | 4. Wiener Gemeindebezirk | 3017382 |');
+    expect(rows[3]).toContain(' | ### ## | ');
   });
 
   it('escapes the pipes of a postal format so the row keeps its cells', async () => {

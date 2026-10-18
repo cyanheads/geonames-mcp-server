@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/geonames-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/geonames-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/geonames-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/geonames-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/geonames-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/geonames-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,13 +29,13 @@
 
 ## Overview
 
-The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, each keyed by a stable integer `geonameId` and linked into an administrative tree from continent to neighborhood. Search places, read full records, walk the admin hierarchy, reverse geocode coordinates, look up postal codes, and read country facts. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, linked into an administrative tree from continent to neighborhood. Search places, read full records, walk the admin hierarchy, reverse geocode coordinates, look up postal codes, and read country facts.
 
 ### Tools
 
 | Tool | Description |
 |:---|:---|
-| `geonames_search_places` | Search places by name, country, feature class or code, population tier, and bounding box |
+| `geonames_search_places` | Search places by name, country, admin division code, feature class or code, population tier, and bounding box |
 | `geonames_get_place` | Full record for one `geonameId`: admin chain, timezone, elevation, alternate names, postal codes, external identifiers |
 | `geonames_get_hierarchy` | Parent chain from Earth and the continent down to the feature |
 | `geonames_get_children` | Direct children of a feature in the administrative, tourism, or dependency tree |
@@ -48,10 +48,12 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, each
 
 ### `geonames_search_places` <sub>tool</sub>
 
-- `query` (up to 200 characters) compared per `match`: `name_required` (default), `any_field`, `exact_name`, or `name_prefix`; filters `countries` (up to 10, by ISO alpha-2, alpha-3, or numeric code), `featureClasses`, `featureCodes` (up to 20), `cities` (`cities1000` / `cities5000` / `cities15000`), and `boundingBox`. A call needs `query` or one of `countries`, `featureClasses`, `featureCodes`, `boundingBox`
-- `limit` 1–100 (default 10), `offset` 0–5000, `orderBy` `relevance` or `population`; returns `totalCount`, `effectiveQuery`, and `nextOffset`
+- `query` (up to 200 characters) compared per `match`: `name_required` (default), `any_field`, `exact_name`, or `name_prefix`; filters `countries` (up to 10, by ISO alpha-2, alpha-3, or numeric code), `adminCode1`–`adminCode4`, `featureClasses`, `featureCodes` (up to 20), `cities` (`cities1000` / `cities5000` / `cities15000`), and `boundingBox`. A call needs `query` or one of `countries`, `featureClasses`, `featureCodes`, `boundingBox`
+- A listed country also returns the territories GeoNames files under it (`GB` also returns IM, GG, JE, and GS), each place under its own `countryCode`; the notice names any country on the page that `countries` does not list
+- `adminCode1`–`adminCode4` search inside an admin division by its GeoNames code, as `geonames_get_place` and `geonames_reverse_geocode` return it in `adminLevels` (`countries: ["US"], adminCode1: "TX", featureCodes: ["AIRP"]` lists Texas airports). Codes are case-insensitive and zero padding counts (`02`, not `2`); they are not ISO 3166-2 or postal codes (Bavaria is `02`, not `BY`). Each needs exactly one country, and levels 2–4 need `adminCode1`
+- `limit` 1–1,000 (default 10), held to 100 per call with a notice when more remain; `offset` 0–5000, `orderBy` `relevance` or `population` (omitted, GeoNames' own order); returns `totalCount`, `effectiveQuery`, and `nextOffset`
 - `featureClasses`, `featureCodes`, and `cities` (class P only) intersect: with both lists set, each code's class must be listed and each listed class needs a code; beside `cities`, only class P and its codes. Anything else fails as `feature_filter_mismatch`
-- Fails before any request with `query_or_filter_required`, `query_required`, `unknown_country_code`, `unknown_feature_code`, `feature_filter_mismatch`, or `invalid_bounding_box`
+- Fails before any request with `query_or_filter_required`, `query_required`, `unknown_country_code`, `unknown_feature_code`, `admin_code_unscoped`, `feature_filter_mismatch`, or `invalid_bounding_box`
 
 ---
 
@@ -74,7 +76,7 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, each
 
 - `hierarchy`: `administrative` (default), `tourism` (islands, coasts, and their municipalities; almost all in Spain), or `dependency` (a country's dependent territories). Children are mostly admin divisions (class A) and populated places (class P); continents and coasts are class L, islands class T
 - GeoNames answers a `tourism` or `dependency` request with the administrative children when the feature has no such tree. The tool compares the two lists and sets `sameAsAdministrative`, with a notice, when they match; the rows stay, since a real tree can match too
-- Fetches up to 1,000 children per parent once and caches them, so `nameContains`, `limit` (1–500, default 100), and `offset` cost no extra credits; a notice says when GeoNames lists more
+- Fetches up to 1,000 children per parent once and caches them, so `nameContains`, `limit` (1–1,000, default 100, held to 500 per call with a notice when more remain), and `offset` cost no extra credits; a notice says when GeoNames lists more
 - An unknown id returns `found: false`; a leaf returns an empty `children` list with a notice
 
 ---
@@ -83,23 +85,25 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, each
 
 - `lat` / `lng` resolve to `country` and `adminLevels` (down to ADM5, each with its `geonameId` and ISO 3166-2 subdivision code where one exists) or, offshore, the `ocean`
 - `coastalBufferKm` (0–50, default 0) matches the nearest country within that distance when none contains the point, for harbor, pier, and shoreline fixes; a buffered match carries `country.distanceInKm`, and the nearby and timezone lookups keep the exact point
-- `nearby` lists the nearest populated places (`nearbyLimit` 0–50, default 5; `radiusKm` up to 300, default 20; optional `cities` tier) or, when `featureClasses` / `featureCodes` is set, the nearest features of that type; `nearbyKind` says which. `featureClasses` and `featureCodes` intersect
+- `nearby` lists the nearest populated places (`nearbyLimit` 0–1,000, default 5, held to 50 per call with a notice when more lie within the radius; `radiusKm` up to 300, default 20; optional `cities` tier) or, when `featureClasses` / `featureCodes` is set, the nearest features of that type; `nearbyKind` says which. `featureClasses` and `featureCodes` intersect
 - Fails before any request with `conflicting_filters` (`cities` with a feature filter), `unknown_feature_code`, or `feature_filter_mismatch` (a code whose class is not listed, or a listed class with no code)
-- `includeTimezone` adds the IANA id, UTC offsets, local time, sunrise, and sunset (offsets only offshore, where 1 July is reported at the standard offset)
+- `includeTimezone` adds the IANA id, UTC offsets, local time, sunrise, and sunset (offsets only offshore, where both dates are reported at the standard offset)
 
 ---
 
 ### `geonames_find_postal_codes` <sub>tool</sub>
 
-- `mode`: `code` (needs `postalCode`), `place_name` (needs `placeName`), or `nearby` (needs `lat` and `lng`; `radiusKm` up to 30, default 10); a missing field, or `countries` in `nearby`, fails as `mode_fields_mismatch`
-- `countries` filter for `code` and `place_name`, by ISO alpha-2, alpha-3, or numeric code (an alpha-3 or numeric code no country has fails as `unknown_country_code`); `limit` 1–100 (default 10); GeoNames reports no total, so a full page is marked truncated
+- `mode`: `code` (needs `postalCode`), `place_name` (needs `placeName`), or `nearby` (needs `lat` and `lng`; `radiusKm` up to 30, default 10); a missing field, or `countries` or an `offset` above 0 in `nearby`, fails as `mode_fields_mismatch`
+- `countries` filter for `code` and `place_name`, by ISO alpha-2, alpha-3, or numeric code (the 250 country codes plus the retired `AN`, `CS`, and `YU`; any other, such as `EL` or `ZZZ`, fails as `unknown_country_code`)
+- A listed country also returns the territories GeoNames files under it (`GB` also returns IM, JE, and GG), each postal code under its own `countryCode`; the notice names any country on the page that `countries` does not list
+- `limit` 1–1,000 (default 10), held to 100 per call with a notice when more remain; `code` and `place_name` page with `offset` 0–5000 and return `nextOffset` while more rows remain below offset 5000; GeoNames reports no total, so `truncated` says whether more rows exist, never how many
 - Covers 122 countries; Ireland returns only Eircode routing keys and Malta only letter prefixes
 
 ---
 
 ### `geonames_get_countries` <sub>tool</sub>
 
-- Up to 50 `countries` by ISO alpha-2, alpha-3, or numeric code, a `continent`, `nameContains`, or no filter for all 250; `limit` 1–250 (default 50) with `offset`
+- Up to 250 `countries` by ISO alpha-2, alpha-3, or numeric code, a `continent`, `nameContains`, or no filter for all 250; `limit` 1–1,000 (default 50), held to 250 per call, with `offset`
 - Rows carry ISO and FIPS codes, `geonameId` (the starting point for `geonames_get_children`), capital, population, area, continent, languages, currency, postal-code format, and mainland bounding box; unknown codes land in `notFound`
 
 ---
@@ -107,7 +111,7 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, each
 ### `geonames_list_reference` <sub>tool</sub>
 
 - `topic`: `feature_classes` (9), `feature_codes` (684, filterable by `featureClass`), or `postal_countries` (122, with each country's code range and count); `featureClass` with another topic fails as `filter_not_applicable`
-- `nameContains`, `limit` 1–700 (default 100), and `offset`; feature classes and codes are bundled and spend no credits
+- `nameContains`, `limit` 1–1,000 (default 100, held to 700 per call, which fits every topic), and `offset`; feature classes and codes are bundled and spend no credits
 
 ## Features
 
@@ -118,7 +122,7 @@ GeoNames-specific:
 - Data from [GeoNames](https://www.geonames.org/), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/): results you pass on must credit GeoNames. This server is independent of GeoNames.
 - Per-account pacing at 1,000 requests an hour, with a cooldown after a quota error that holds only that account
 - Responses are cached across callers: searches for 1 hour, timezones never, every other lookup for 24 hours. A cache hit spends no credit
-- Forgiving inputs: comma-separated lists, any-case enums and codes, alpha-3 and numeric country codes, `UK` for `GB`, a `P.PPLC` class prefix, and a geonames.org URL in place of a `geonameId`
+- Forgiving inputs: alpha-3 and numeric country codes, `UK` for `GB`, and `FL` for `LI`. The server also accepts forms its advertised schemas leave out (a comma-joined string for a list, other casings of enums and codes, a `P.PPLC` class prefix, a geonames.org URL or a JSON integer for a `geonameId`, extra spaces in a postal code, `username` for `geonamesUsername`), but the tool descriptions offer only the canonical forms, since a client that validates arguments refuses the rest
 
 Agent-friendly output:
 
@@ -129,7 +133,7 @@ Agent-friendly output:
 Known limitations:
 
 - **Shared quota on a shared deployment.** All callers without their own username share the server account's 1,000 credits an hour. A burst of reverse geocodes (up to 7 credits each) can exhaust it, and GeoNames does not say when the window resets.
-- **Search reaches only offset 5000** on the free tier, and `limit` caps at 100, so a result set is reachable up to its 5,100th row.
+- **Search and postal searches reach only offset 5000** on the free tier, and a page holds at most 100 rows, so a result set is reachable up to its 5,100th row. Nearby postal lookups do not page.
 - **Children cap at 1,000 per parent.**
 - **Postal data covers 122 countries.** Ireland and Malta return only code prefixes. US nearby lookups place the first row at the query point rather than the ZIP centroid.
 - **Nearby radius tops out at 300 km** for places and features and 30 km for postal codes, GeoNames' free-tier ceilings.
@@ -137,7 +141,7 @@ Known limitations:
 - **Coastal points can resolve to the ocean without a buffer.** By default only a country that contains the point matches, so a harbor or shoreline point just outside the outline returns the sea while its nearby places are on land. Set `coastalBufferKm` (up to 50) to match the nearest country instead; in a strait that can be either shore.
 - **Microstates and enclaves can resolve to the surrounding country.** A point inside Vatican City returns Italy.
 - **Nearest populated places include sections and historical places.** In a dense city the nearest rows are often `PPLX` quarters or `PPLH` former districts; each row's `featureCode` says which, and `cities` restricts to places above a population tier.
-- **Offshore timezones are offsets only.** No IANA id, local time, sunrise, or sunset is available at sea, and the 1 July offset is the standard offset (open water has no DST).
+- **Offshore timezones are offsets only.** No IANA id, local time, sunrise, or sunset is available at sea, and both dated offsets are the standard offset (open water has no DST).
 - **`exact_name` matches alternate and historical names**, so a result's `name` can differ from the query: "Springfield" can return Plattsburg or Palmyra, MO.
 - **Data is community-edited and provided "as is".** Many features have no recorded population or elevation.
 
@@ -260,7 +264,7 @@ cp .env.example .env
 
 ## Configuration
 
-Every GeoNames call spends credits from a GeoNames account. `GEONAMES_USERNAME` is the server's account: a free GeoNames account with free web services enabled on its account page. Every tool also takes `geonamesUsername` (alias `username`), so a caller on a shared deployment can spend their own account instead of the server's. When neither is set, calls fail with `username_required`; only the bundled `feature_classes` and `feature_codes` topics of `geonames_list_reference` work without an account.
+Every GeoNames call spends credits from a GeoNames account. `GEONAMES_USERNAME` is the server's account: a free GeoNames account with free web services enabled on its account page. Every tool also takes `geonamesUsername`, so a caller on a shared deployment can spend their own account instead of the server's. When neither is set, calls fail with `username_required`; only the bundled `feature_classes` and `feature_codes` topics of `geonames_list_reference` work without an account.
 
 A free account gets 1,000 credits an hour and 10,000 a day. Cached lookups spend nothing.
 
@@ -268,7 +272,7 @@ A free account gets 1,000 credits an hour and 10,000 a day. Cached lookups spend
 |:---|:---|
 | `geonames_search_places`, `geonames_get_place`, `geonames_get_hierarchy` | 1 |
 | `geonames_get_children` | 1; 2 for `tourism` or `dependency` when the parent's administrative list is not cached |
-| `geonames_find_postal_codes` | 1 (`code`, `place_name`); 2 (`nearby`) |
+| `geonames_find_postal_codes` | 1 (`code`, `place_name`; a miss with `countries` adds 1 for the postal coverage list unless it is cached); 2 (`nearby`) |
 | `geonames_reverse_geocode` | 1 for containment (with or without `coastalBufferKm`), plus 3 for nearest populated places or 4 for nearest features, 1 for the ocean when no country contains the point or lies within the buffer, and 1 for the timezone |
 | `geonames_get_countries` | 1 a day; the country table is cached |
 | `geonames_list_reference` | 0 for `feature_classes` and `feature_codes`; 1 a day for `postal_countries` |
@@ -282,7 +286,7 @@ A free account gets 1,000 credits an hour and 10,000 a day. Cached lookups spend
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<app-root>/logs` |
-| `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result, redacted by key name (`geonamesUsername` and `username` included). | `false` |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result, redacted by key name: a GeoNames username is removed under `geonamesUsername`, `username`, or any near-miss key with a `user` or `account` word. | `false` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1`. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
@@ -318,7 +322,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 | `src/config` | `GEONAMES_USERNAME` parsing and validation with Zod. |
 | `src/mcp-server/tools` | The eight tool definitions (`*.tool.ts`) and the inputs they share (`shared-inputs.ts`). |
 | `src/services/geonames` | GeoNames service: fetch boundary, status mapping, retry, per-account pacing, response cache, parsers, and the bundled feature-code and country-code tables. |
-| `src/utils` | Inline-text sanitizer for GeoNames-authored text in `format()` output. |
+| `src/utils` | Inline-text sanitizer for GeoNames-authored and caller-echoed text in `format()` output and the enrichment trailer renders. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
 | `docs/design.md` | Design notes: tool surface, credential model, upstream behavior. |
 

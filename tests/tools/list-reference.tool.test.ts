@@ -138,14 +138,28 @@ describe('input normalization', () => {
     expect(result.totalCount).toBe(total);
   });
 
-  it('says topic is case-insensitive', () => {
-    expect(listReferenceTool.input.shape.topic.description).toContain('Case-insensitive.');
+  it('names each topic as the advertised enum spells it, offering no other casing', () => {
+    const { description } = listReferenceTool.input.shape.topic;
+    for (const topic of ['feature_classes (', 'feature_codes (', 'postal_countries (']) {
+      expect(description).toContain(topic);
+    }
+    expect(description?.match(/feature_classes|feature_codes|postal_countries/gi)).toEqual([
+      'feature_classes',
+      'feature_codes',
+      'postal_countries',
+    ]);
+    expect(description).not.toMatch(/case-insensitive/i);
   });
 
-  it.each([0, -1, 701, 1.5, 'many', null])('rejects limit %j', async (limit) => {
-    const error = errorOf(await run({ topic: 'feature_codes', limit }));
-    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
-  });
+  it.each([0, -1, 1001, 1.5, 'many', true, { value: 5 }])(
+    'rejects limit %j before any request',
+    async (limit) => {
+      useService(postalRoute());
+      const error = errorOf(await run({ topic: 'postal_countries', limit }));
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([-1, 0.5, 'next'])('rejects offset %j', async (offset) => {
     const error = errorOf(await run({ topic: 'feature_codes', offset }));
@@ -157,11 +171,20 @@ describe('input normalization', () => {
     expect(page(await run({ topic: 'feature_codes', limit: 700 })).shown).toBe(684);
   });
 
-  it.each(['', '   '])('reads a blank limit and offset (%j) as unset', async (blank) => {
-    const result = page(await run({ topic: 'feature_codes', limit: blank, offset: blank }));
-    expect(result.cap).toBe(100);
-    expect(result.entries[0]?.code).toBe('ADM1');
+  it('describes the 1,000 ceiling, the 700 cap, and the default', () => {
+    expect(listReferenceTool.input.shape.limit.description).toBe(
+      'Maximum entries to return, 1 to 1,000. This tool returns at most 700 per call: a larger limit is held to 700, and the notice says so when more entries remain. Default 100.',
+    );
   });
+
+  it.each(['', '   ', null])(
+    'reads a blank or null limit and offset (%j) as unset',
+    async (blank) => {
+      const result = page(await run({ topic: 'feature_codes', limit: blank, offset: blank }));
+      expect(result.cap).toBe(100);
+      expect(result.entries[0]?.code).toBe('ADM1');
+    },
+  );
 
   it.each(['', ' '])('reads a blank featureClass (%j) as unset', async (blank) => {
     const result = page(await run({ topic: 'feature_codes', featureClass: blank, limit: 700 }));
@@ -439,14 +462,20 @@ describe('feature_codes', () => {
     );
   });
 
-  it('echoes the filter text into the notice inline and markdown-inert', async () => {
-    const result = page(
-      await run({ topic: 'feature_codes', nameContains: 'q[x](http://e.test) <b>\nzzz' }),
+  it('carries the filter text raw in structuredContent and markdown-inert in content[]', async () => {
+    const hostile = 'q[x](http://e.test) <b>\nzzz\n## Heading';
+    const result = await run({ topic: 'feature_codes', nameContains: hostile });
+    expect(page(result).notice).toBe(
+      `Nothing in feature_codes matches "${hostile}"; call again without nameContains.`,
     );
-    expect(result.notice).toBe(
-      'Nothing in feature_codes matches "q\\[x\\](http\\[:\\]//e.test) &lt;b&gt; zzz"; call again without nameContains.',
+    const rendered = allText(result);
+    expect(rendered.slice(rendered.lastIndexOf('\n'))).toBe(
+      '\n> Nothing in feature_codes matches "q\\[x\\](http\\[:\\]//e.test) &lt;b&gt; zzz ## Heading"; call again without nameContains.',
     );
-    expect(result.notice).not.toMatch(/[\r\n]/);
+    expect(rendered.split('\n').filter((line) => line.startsWith('#'))).toEqual([
+      '## GeoNames feature codes (topic feature_codes)',
+    ]);
+    expect(rendered).not.toContain('<b>');
   });
 
   it('leaves description absent where GeoNames gives none', async () => {
@@ -567,6 +596,85 @@ describe('postal_countries', () => {
   });
 });
 
+describe('a limit above the 700 cap', () => {
+  const CLAMP = (requested: number) =>
+    `limit ${requested} was capped at 700, the most this tool returns per call.`;
+
+  /** A postal coverage list of `count` rows, longer than any topic GeoNames holds today. */
+  const postalRows = (count: number) => ({
+    geonames: Array.from({ length: count }, (_, index) => ({
+      countryCode: `C${index + 1}`,
+      countryName: `Country ${index + 1}`,
+      numPostalCodes: index,
+    })),
+  });
+
+  it('returns all 684 feature codes for limit 1000, with cap 700 and no clamp fragment', async () => {
+    const result = await run({ topic: 'feature_codes', limit: 1000 });
+    expect(page(result).entries.map((entry) => entry.code)).toEqual(
+      FEATURE_CODES.map((entry) => entry.code),
+    );
+    expect(page(result)).toMatchObject({ cap: 700, shown: 684, truncated: false });
+    expect(page(result)).not.toHaveProperty('nextOffset');
+    expect(page(result).notice).toBeUndefined();
+    expect(allText(result)).toMatch(/\n\*\*cap:\*\* 700$/);
+    expect(allText(result)).not.toContain('capped');
+  });
+
+  it.each([701, 1000])(
+    'holds limit %i to 700 and names the clamp before the next offset',
+    async (limit) => {
+      useService(postalRoute(postalRows(750)));
+      const result = await run({ topic: 'postal_countries', limit });
+      const data = page(result);
+      expect(data.entries).toHaveLength(700);
+      expect(data.entries.at(-1)?.code).toBe('C700');
+      expect(data).toMatchObject({
+        cap: 700,
+        shown: 700,
+        totalCount: 750,
+        truncated: true,
+        nextOffset: 700,
+        notice: `${CLAMP(limit)} 50 more entries; call again with offset 700.`,
+      });
+      const rendered = allText(result);
+      expect(rendered.slice(rendered.lastIndexOf('\n'))).toBe(
+        `\n> ${CLAMP(limit)} 50 more entries; call again with offset 700.`,
+      );
+    },
+  );
+
+  it('applies limit 700 as given, with no clamp fragment', async () => {
+    useService(postalRoute(postalRows(750)));
+    const result = page(await run({ topic: 'postal_countries', limit: 700 }));
+    expect(result).toMatchObject({ cap: 700, shown: 700, truncated: true });
+    expect(result.notice).toBe('50 more entries; call again with offset 700.');
+  });
+
+  it('ends a clamped list on its second page, with no clamp fragment', async () => {
+    useService(postalRoute(postalRows(750)));
+    const last = page(await run({ topic: 'postal_countries', limit: 1000, offset: 700 }));
+    expect(last.entries.map((entry) => entry.code)).toEqual(
+      Array.from({ length: 50 }, (_, index) => `C${index + 701}`),
+    );
+    expect(last).toMatchObject({ cap: 700, shown: 50, truncated: false });
+    expect(last.notice).toBeUndefined();
+  });
+
+  it('says nothing of the clamp on a no-match or a past-the-end page', async () => {
+    const none = page(await run({ topic: 'feature_codes', nameContains: 'zzzqq', limit: 1000 }));
+    expect(none).toMatchObject({ cap: 700, shown: 0 });
+    expect(none.notice).toBe(
+      'Nothing in feature_codes matches "zzzqq"; call again without nameContains.',
+    );
+    const past = page(await run({ topic: 'feature_codes', limit: 1000, offset: 700 }));
+    expect(past).toMatchObject({ cap: 700, shown: 0 });
+    expect(past.notice).toBe(
+      'offset 700 is past the last entry (684); call again with a smaller offset.',
+    );
+  });
+});
+
 describe('enrichment on the production output path', () => {
   it('writes the neutral fields on a zero-result page', async () => {
     const result = await run({ topic: 'feature_codes', nameContains: 'zzzqq', limit: 25 });
@@ -627,6 +735,17 @@ describe('enrichment on the production output path', () => {
       cap: 10,
       notice: '674 more entries; call again with offset 10.',
     });
+  });
+
+  it.each([
+    ['zero-result', { geonames: [] }, { totalCount: 0, shown: 0, truncated: false }],
+    ['under-cap', POSTAL_COUNTRIES_BODY, { totalCount: 3, shown: 3, truncated: false }],
+  ])('writes cap 700 for limit 1000 on the %s postal page', async (_page, body, fields) => {
+    useService(postalRoute(body));
+    const result = await run({ topic: 'postal_countries', limit: 1000 });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({ ...fields, cap: 700 });
+    expect(allText(result)).toMatch(/\n\*\*cap:\*\* 700$/);
   });
 });
 
@@ -736,6 +855,21 @@ describe('format()', () => {
     const result = await run({ topic: 'feature_codes', limit: 5 });
     expect(allText(result)).toContain(page(result).notice ?? 'missing notice');
   });
+
+  it.each([
+    ['a truncated page', { topic: 'feature_codes', limit: 5 }],
+    ['a scoped no-match', { topic: 'feature_codes', featureClass: 'P', nameContains: 'zzzqq' }],
+    ['an offset past the end', { topic: 'feature_classes', offset: 9 }],
+  ])(
+    'prints its own notice text for %s unchanged in the content[] trailer',
+    async (_page, input) => {
+      const result = await run(input);
+      const { notice } = page(result);
+      expect(notice).toBeDefined();
+      const rendered = allText(result);
+      expect(rendered.slice(rendered.lastIndexOf('\n'))).toBe(`\n> ${notice}`);
+    },
+  );
 });
 
 describe('declared error contracts', () => {

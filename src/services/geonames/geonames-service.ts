@@ -141,9 +141,13 @@ interface CallSpec<T> {
   ttlMs: number;
 }
 
+/** One shared upstream request and the callers waiting on it. */
 interface Flight {
+  /** Owned by the flight, so no caller's cancellation reaches the request. */
+  controller: AbortController;
   promise: Promise<unknown>;
-  signal: AbortSignal;
+  /** Callers still waiting; the request aborts when the last one leaves. */
+  waiting: number;
 }
 
 /** A body read: the decoded text and its size on the wire. */
@@ -163,6 +167,19 @@ function cacheKeyOf(endpoint: string, params: QueryParams): string {
   return `${endpoint}?${new URLSearchParams(sorted.map(([k, v]) => [k, v])).toString()}`;
 }
 
+/**
+ * The `date` sent to `timezoneJSON` (Design Decision 51). GeoNames' default sunrise and
+ * sunset are for the solar day of the UTC date at the point's longitude, and `date` asks
+ * for one more solar day. The solar day whose events fall on the point's local date is the
+ * default day or the one before it while UTC hours plus `lng / 15` stay below 12, and the
+ * default day or the one after it from then on, so `date` is that other day.
+ */
+function solarDateParam(nowMs: number, lng: number): string {
+  const dayStart = nowMs - (nowMs % DAY_MS);
+  const solarHours = (nowMs - dayStart) / HOUR_MS + lng / 15;
+  return new Date(dayStart + (solarHours < 12 ? -DAY_MS : DAY_MS)).toISOString().slice(0, 10);
+}
+
 /** `withRetry` predicate: the framework default, except a spent quota fails at once. */
 const isTransient = (error: unknown): boolean =>
   reasonOf(error) !== 'quota_exhausted' && defaultIsTransient(error);
@@ -174,6 +191,7 @@ export class GeoNamesService {
   readonly #createPacer: typeof createPacer;
   readonly #fetch: FetchLike;
   readonly #flights = new Map<string, Flight>();
+  readonly #now: () => number;
   /** Caller-account pacers, least recently used first. */
   readonly #pacers = new Map<string, Pacer>();
   readonly #serverAccount: GeoNamesAccount | undefined;
@@ -183,10 +201,11 @@ export class GeoNamesService {
     this.#baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.#createPacer = options.createPacer ?? createPacer;
     this.#fetch = options.fetch ?? ((url, init) => fetch(url, init));
+    this.#now = options.now ?? Date.now;
     this.#cache = new ResponseCache({
       maxBytes: 32 * 1024 * 1024,
       maxEntries: 5_000,
-      now: options.now ?? Date.now,
+      now: this.#now,
     });
     this.#serverAccount =
       options.serverUsername === undefined
@@ -237,6 +256,10 @@ export class GeoNamesService {
       }
     }
     for (const country of params.countries ?? []) query.push(['country', country]);
+    for (const name of ['adminCode1', 'adminCode2', 'adminCode3', 'adminCode4'] as const) {
+      const code = params[name];
+      if (code !== undefined) query.push([name, code]);
+    }
     for (const featureClass of params.featureClasses ?? [])
       query.push(['featureClass', featureClass]);
     for (const featureCode of params.featureCodes ?? []) query.push(['featureCode', featureCode]);
@@ -250,7 +273,7 @@ export class GeoNamesService {
         ['west', String(west)],
       );
     }
-    if (params.orderBy === 'population') query.push(['orderby', 'population']);
+    if (params.orderBy) query.push(['orderby', params.orderBy]);
     query.push(['maxRows', String(params.limit)], ['startRow', String(params.offset)]);
     return this.#call(
       {
@@ -456,8 +479,9 @@ export class GeoNamesService {
   }
 
   /**
-   * `timezoneJSON` (1 credit, never cached: it carries the current local time).
-   * `undefined` when GeoNames answers status 15.
+   * `timezoneJSON` (1 credit, never cached: it carries the current local time), with the
+   * `date` whose solar day covers the point's local date when GeoNames' default one does
+   * not. `undefined` when GeoNames answers status 15.
    */
   timezone(
     lat: number,
@@ -471,6 +495,7 @@ export class GeoNamesService {
         params: [
           ['lat', String(lat)],
           ['lng', String(lng)],
+          ['date', solarDateParam(this.#now(), lng)],
         ],
         ttlMs: 0,
         parse: (payload) => bodyOr(payload, undefined, parseTimezone),
@@ -480,7 +505,10 @@ export class GeoNamesService {
     );
   }
 
-  /** `postalCodeSearchJSON` (1 credit, cached 24 h): by postal code or by place name. */
+  /**
+   * `postalCodeSearchJSON` (1 credit, cached 24 h): by postal code or by place name. GeoNames
+   * documents no `startRow` here but honors it in both lookups, up to 5000.
+   */
   postalSearch(
     params: PostalSearchParams,
     account: GeoNamesAccount,
@@ -490,7 +518,7 @@ export class GeoNamesService {
     if (params.postalCode !== undefined) query.push(['postalcode', params.postalCode]);
     if (params.placeName !== undefined) query.push(['placename', params.placeName]);
     for (const country of params.countries ?? []) query.push(['country', country]);
-    query.push(['maxRows', String(params.limit)]);
+    query.push(['maxRows', String(params.limit)], ['startRow', String(params.offset)]);
     return this.#call(
       {
         endpoint: 'postalCodeSearchJSON',
@@ -563,8 +591,8 @@ export class GeoNamesService {
       const hit = this.#cache.get(cacheKey);
       if (hit) return Promise.resolve(hit.value as T);
     }
-    return this.#singleFlight(`${account.key} ${cacheKey}`, ctx, async () => {
-      const { value, bytes } = await this.#fetchWithRetry(spec, account, ctx);
+    return this.#singleFlight(`${account.key} ${cacheKey}`, ctx.signal, async (signal) => {
+      const { value, bytes } = await this.#fetchWithRetry(spec, account, ctx, signal);
       if (spec.ttlMs > 0 && (spec.cacheable?.(value) ?? true)) {
         this.#cache.set(cacheKey, value, bytes, spec.ttlMs);
       }
@@ -573,39 +601,72 @@ export class GeoNamesService {
   }
 
   /**
-   * Joins an identical in-flight request on the same account, else starts one. A joiner
-   * whose leader was cancelled starts its own request instead of inheriting the abort.
+   * Joins an identical in-flight request on the same account, else starts one. Each
+   * caller races the shared request against its own signal: a cancelled caller rejects
+   * at once with its own `signal.reason` while the others keep waiting, and the request
+   * aborts only when its last caller has left. Its outcome, failure included, reaches
+   * every caller still waiting.
    */
-  async #singleFlight<T>(key: string, ctx: Context, run: () => Promise<T>): Promise<T> {
-    const existing = this.#flights.get(key);
-    if (existing) {
-      try {
-        return (await existing.promise) as T;
-      } catch (error) {
-        if (!existing.signal.aborted || ctx.signal.aborted) throw error;
-      }
-    }
-    const flight: Flight = { promise: run(), signal: ctx.signal };
-    this.#flights.set(key, flight);
-    try {
-      return (await flight.promise) as T;
-    } finally {
-      if (this.#flights.get(key) === flight) this.#flights.delete(key);
-    }
+  #singleFlight<T>(
+    key: string,
+    signal: AbortSignal,
+    run: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    if (signal.aborted) return Promise.reject(signal.reason);
+    const flight = this.#flights.get(key) ?? this.#startFlight(key, run);
+    flight.waiting++;
+    return new Promise<T>((resolve, reject) => {
+      const leave = () => {
+        reject(signal.reason);
+        if (--flight.waiting > 0) return;
+        if (this.#flights.get(key) === flight) this.#flights.delete(key);
+        flight.controller.abort(signal.reason);
+      };
+      signal.addEventListener('abort', leave, { once: true });
+      flight.promise.then(
+        (value) => {
+          signal.removeEventListener('abort', leave);
+          resolve(value as T);
+        },
+        (error: unknown) => {
+          signal.removeEventListener('abort', leave);
+          reject(error);
+        },
+      );
+    });
   }
 
-  /** The retry ladder; its total-deadline expiry is restated as `upstream_timeout`. */
+  /**
+   * Starts a shared request on a flight-owned signal, so no caller's cancellation
+   * reaches it. It leaves the map when it settles, or sooner when its last caller leaves.
+   */
+  #startFlight(key: string, run: (signal: AbortSignal) => Promise<unknown>): Flight {
+    const controller = new AbortController();
+    const flight: Flight = { controller, promise: run(controller.signal), waiting: 0 };
+    this.#flights.set(key, flight);
+    const land = () => {
+      if (this.#flights.get(key) === flight) this.#flights.delete(key);
+    };
+    flight.promise.then(land, land);
+    return flight;
+  }
+
+  /**
+   * The retry ladder, run on the flight's signal rather than a caller's; `ctx` only
+   * correlates its log records. Its total-deadline expiry is restated as `upstream_timeout`.
+   */
   #fetchWithRetry<T>(
     spec: CallSpec<T>,
     account: GeoNamesAccount,
     ctx: Context,
+    signal: AbortSignal,
   ): Promise<{ bytes: number; value: T }> {
     const pacer = this.#pacerFor(account);
     const ladder = withRetry(
-      async ({ remainingMs, signal }) => {
+      async ({ remainingMs, signal: attemptSignal }) => {
         try {
           return await pacer.run((taskSignal) => this.#attempt(spec, account, ctx, taskSignal), {
-            signal,
+            signal: attemptSignal,
             maxWaitMs: Math.min(MAX_QUEUE_WAIT_MS, remainingMs),
           });
         } catch (error) {
@@ -618,7 +679,7 @@ export class GeoNamesService {
       {
         operation: `GeoNamesService.${spec.endpoint}`,
         context: ctx,
-        signal: ctx.signal,
+        signal,
         maxRetries: 2,
         baseDelayMs: 1_000,
         maxDelayMs: 5_000,
@@ -638,7 +699,9 @@ export class GeoNamesService {
    * while the call is cancelled or out of time surfaces as the abort reason, so the
    * runtime's own error, which can carry the request URL, never enters an error chain.
    * The response record goes to the process logger only: through `ctx.log` it would
-   * tell the client a cache miss from a hit.
+   * tell the client a cache miss from a hit. It names the account side as `payer`,
+   * since every log sink redacts a key holding an `account` or `user` word
+   * (`USERNAME_LOG_FIELDS`).
    */
   async #attempt<T>(
     spec: CallSpec<T>,
@@ -670,7 +733,7 @@ export class GeoNamesService {
         endpoint: spec.endpoint,
         httpStatus: response.status,
         bodyBytes: bytes,
-        account: account.source,
+        payer: account.source,
       }),
     );
     return { bytes, value: spec.parse(this.#toPayload(response.status, text, account)) };

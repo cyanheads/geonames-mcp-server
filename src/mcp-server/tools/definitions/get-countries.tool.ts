@@ -9,8 +9,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   blankAsUnset,
+  clampedLimitInput,
+  clampLimit,
   geonamesUsernameInput,
-  limitInput,
   listInput,
   nameContainsInput,
   nameMatcher,
@@ -21,9 +22,12 @@ import {
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import type { CountryInfo } from '@/services/geonames/types.js';
-import { tableCell } from '@/utils/inline-text.js';
+import { inlineText, tableCell } from '@/utils/inline-text.js';
 
 const CONTINENTS = ['AF', 'AN', 'AS', 'EU', 'NA', 'OC', 'SA'] as const;
+
+/** The most countries one page returns; a larger `limit` is held to it. */
+const MAX_LIMIT = 250;
 
 /** True when `code` is the country's alpha-2, alpha-3, or (zero-padded) numeric code. */
 const hasCode = (country: CountryInfo, code: string): boolean =>
@@ -45,9 +49,9 @@ export const getCountriesTool = tool('geonames_get_countries', {
         .string()
         .regex(/^([A-Z]{2,3}|\d{3})$/)
         .describe('ISO 3166-1 alpha-2, alpha-3, or three-digit numeric country code.'),
-      { max: 50, normalize: toAlpha2 },
+      { max: 250, normalize: toAlpha2 },
     ).describe(
-      'Countries to return by ISO 3166-1 code: alpha-2 (US), alpha-3 (USA), or three-digit numeric (840), up to 50, as a list or a comma-separated string. Case-insensitive; UK is accepted for GB. Match country names with nameContains instead.',
+      'Countries to return by ISO 3166-1 code: alpha-2 (US), alpha-3 (USA), or three-digit numeric (840), up to 250, as a list. UK is accepted for GB and FL for LI. Match country names with nameContains instead.',
     ),
     continent: blankAsUnset(
       z.preprocess(
@@ -55,12 +59,12 @@ export const getCountriesTool = tool('geonames_get_countries', {
         z.enum(CONTINENTS).optional(),
       ),
     ).describe(
-      'Keep only countries on this continent: AF Africa, AN Antarctica, AS Asia, EU Europe, NA North America, OC Oceania, SA South America. Case-insensitive.',
+      'Keep only countries on this continent: AF Africa, AN Antarctica, AS Asia, EU Europe, NA North America, OC Oceania, SA South America.',
     ),
     nameContains: nameContainsInput.describe(
       'Keep only countries whose English name contains every word of this text as a substring (niger also matches Nigeria), ignoring case, accents, and punctuation.',
     ),
-    limit: limitInput(250, 50),
+    limit: clampedLimitInput(MAX_LIMIT, 50),
     offset: offsetInput(),
     geonamesUsername: geonamesUsernameInput.describe(
       "Your own GeoNames username, spent only when the country table is not already cached, so the call uses that account's credit instead of the server's. The account needs free web services enabled on its geonames.org account page.",
@@ -138,11 +142,13 @@ export const getCountriesTool = tool('geonames_get_countries', {
     totalCount: z.number().describe('Countries matching the filters, before paging.'),
     truncated: z.boolean().describe('True when more countries remain past this page.'),
     shown: z.number().describe('Countries returned on this page.'),
-    cap: z.number().describe('The limit that was applied.'),
+    cap: z.number().describe('The limit applied: limit as given, or 250 when it asked for more.'),
     notice: z
       .string()
       .optional()
-      .describe('Guidance when nothing matched, the offset is past the end, or more pages remain.'),
+      .describe(
+        'Guidance when nothing matched, the offset is past the end, or more pages remain (naming a limit held to 250).',
+      ),
   },
   errors: [
     {
@@ -192,7 +198,8 @@ export const getCountriesTool = tool('geonames_get_countries', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: input.limit });
+    const limit = clampLimit(input.limit, MAX_LIMIT);
+    ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: limit.applied });
     const service = getGeoNamesService();
     const table = await service.countries(service.resolveAccount(input.geonamesUsername), ctx);
 
@@ -207,7 +214,7 @@ export const getCountriesTool = tool('geonames_get_countries', {
     const notFound = [
       ...new Set(codes?.filter((code) => !table.some((country) => hasCode(country, code)))),
     ];
-    const { page, nextOffset } = paginate(matches, input.offset, input.limit);
+    const { page, nextOffset } = paginate(matches, input.offset, limit.applied);
 
     ctx.enrich.total(matches.length);
     ctx.enrich({ shown: page.length });
@@ -215,8 +222,13 @@ export const getCountriesTool = tool('geonames_get_countries', {
       const remaining = matches.length - nextOffset;
       ctx.enrich.truncated({
         shown: page.length,
-        cap: input.limit,
-        guidance: `${remaining} more ${remaining === 1 ? 'country' : 'countries'}; call again with offset ${nextOffset}.`,
+        cap: limit.applied,
+        guidance: [
+          limit.fragment,
+          `${remaining} more ${remaining === 1 ? 'country' : 'countries'}; call again with offset ${nextOffset}.`,
+        ]
+          .filter(Boolean)
+          .join(' '),
       });
     }
     if (page.length === 0) {
@@ -268,7 +280,7 @@ export const getCountriesTool = tool('geonames_get_countries', {
       }
     }
     if (result.notFound.length > 0) {
-      lines.push('', `**No GeoNames country for:** ${tableCell(result.notFound.join(', '))}`);
+      lines.push('', `**No GeoNames country for:** ${inlineText(result.notFound.join(', '))}`);
     }
     if (result.nextOffset !== undefined) lines.push('', `Next page: offset ${result.nextOffset}.`);
     return [{ type: 'text', text: lines.join('\n') }];

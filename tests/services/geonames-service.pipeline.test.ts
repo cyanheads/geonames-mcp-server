@@ -16,6 +16,7 @@ import {
   getGeoNamesService,
   initGeoNamesService,
 } from '@/services/geonames/geonames-service.js';
+import { ResponseCache } from '@/services/geonames/response-cache.js';
 import {
   BASE_URL,
   CALLER_USERNAME,
@@ -38,6 +39,7 @@ import {
   textResponse,
 } from '../fixtures/geonames-upstream.js';
 import {
+  fixedNow,
   inertCreatePacer,
   inertPacer,
   makeContext,
@@ -128,6 +130,7 @@ describe('process-wide service accessor', () => {
       serverUsername: SERVER_USERNAME,
       createPacer: () => ({ ...inertPacer(), dispose: disposed }),
       fetch: routedFetch({ timezoneJSON: () => jsonResponse(TIMEZONE_PARIS_BODY) }),
+      now: fixedNow,
     });
     expect(getGeoNamesService()).toBe(first);
     return first.timezone(1, 2, first.resolveAccount(undefined), ctx).then(() => {
@@ -512,7 +515,7 @@ describe('pacer map', () => {
 
   it('builds each pacer from the design: 4 concurrent, 100 ms start gap, 1,000/hour, 60 s-1 h cooldown', async () => {
     const { create, created } = pacerFactory();
-    const service = makeService(timezoneFetch(), { createPacer: create });
+    const service = makeService(timezoneFetch(), { createPacer: create, now: fixedNow });
     await callTimezone(service);
     expect(created).toHaveLength(1);
     expect(created[0]?.options).toEqual({
@@ -526,7 +529,7 @@ describe('pacer map', () => {
 
   it('keeps one pacer per account: server, and each caller username', async () => {
     const { create, spy } = pacerFactory();
-    const service = makeService(timezoneFetch(), { createPacer: create });
+    const service = makeService(timezoneFetch(), { createPacer: create, now: fixedNow });
     await callTimezone(service);
     await callTimezone(service);
     expect(spy).toHaveBeenCalledTimes(1);
@@ -539,7 +542,7 @@ describe('pacer map', () => {
 
   it('labels every pacer "geonames", never with a username-derived name', async () => {
     const { create, created } = pacerFactory();
-    const service = makeService(timezoneFetch(), { createPacer: create });
+    const service = makeService(timezoneFetch(), { createPacer: create, now: fixedNow });
     await callTimezone(service, 'caller-a');
     await callTimezone(service, 'caller-b');
     expect(created.map((entry) => entry.options.name)).toEqual(['geonames', 'geonames']);
@@ -548,7 +551,7 @@ describe('pacer map', () => {
 
   it('passes the attempt signal and a queue wait capped at 10 s', async () => {
     const { create, created } = pacerFactory();
-    const service = makeService(timezoneFetch(), { createPacer: create });
+    const service = makeService(timezoneFetch(), { createPacer: create, now: fixedNow });
     await callTimezone(service);
     const runOptions = created[0]?.runs[0] as { maxWaitMs: number; signal: AbortSignal };
     expect(runOptions.maxWaitMs).toBe(10_000);
@@ -571,7 +574,7 @@ describe('pacer map', () => {
 
   it('drops the least recently used caller pacer past 256 callers, without disposing it', async () => {
     const { create, created, spy } = pacerFactory();
-    const service = makeService(timezoneFetch(), { createPacer: create });
+    const service = makeService(timezoneFetch(), { createPacer: create, now: fixedNow });
     for (let index = 0; index < 256; index++) await callTimezone(service, `caller-${index}`);
     expect(spy).toHaveBeenCalledTimes(256);
     await callTimezone(service, 'caller-0');
@@ -589,7 +592,7 @@ describe('pacer map', () => {
 
   it('dispose() disposes every pacer and starts fresh afterwards', async () => {
     const { create, created, spy } = pacerFactory();
-    const service = makeService(timezoneFetch(), { createPacer: create });
+    const service = makeService(timezoneFetch(), { createPacer: create, now: fixedNow });
     await callTimezone(service);
     await callTimezone(service, 'caller-a');
     service.dispose();
@@ -619,7 +622,10 @@ describe('pacer map', () => {
 
     it('restates a local-pacing shed as quota_exhausted over the local window', async () => {
       const fetch = timezoneFetch();
-      const service = makeService(fetch, { createPacer: sheddingFactory(shedError(42), 0) });
+      const service = makeService(fetch, {
+        createPacer: sheddingFactory(shedError(42), 0),
+        now: fixedNow,
+      });
       const error = (await thrown(() => callTimezone(service))) as McpError;
       expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
       expect(error.data).toEqual({
@@ -637,6 +643,7 @@ describe('pacer map', () => {
     it('names a closed cooldown gate as a spent limit moments ago', async () => {
       const service = makeService(timezoneFetch(), {
         createPacer: sheddingFactory(shedError(55), 55_000),
+        now: fixedNow,
       });
       const error = (await thrown(() => callTimezone(service))) as McpError;
       expect(error.data).toMatchObject({
@@ -652,6 +659,7 @@ describe('pacer map', () => {
     it('carries the caller side for a caller account and omits retryAfter when the shed has none', async () => {
       const service = makeService(timezoneFetch(), {
         createPacer: sheddingFactory(shedError(), 0),
+        now: fixedNow,
       });
       const probe = makeContext();
       const error = (await thrown(() =>
@@ -667,6 +675,7 @@ describe('pacer map', () => {
     it('does not retry a shed', async () => {
       const run = vi.fn(() => Promise.reject(shedError(5)));
       const service = makeService(timezoneFetch(), {
+        now: fixedNow,
         createPacer: () => ({
           cooldown: { consecutive: 0, remainingMs: 0 },
           dispose() {},
@@ -694,7 +703,7 @@ describe('pacer map', () => {
             ? jsonResponse(statusEnvelope(19, quotaMessage('hour', SERVER_USERNAME)))
             : jsonResponse(TIMEZONE_PARIS_BODY),
       });
-      const service = makeService(fetch, { createPacer });
+      const service = makeService(fetch, { createPacer, now: fixedNow });
       const first = (await thrown(() => callTimezone(service))) as McpError;
       expect(first.data).toMatchObject({
         reason: 'quota_exhausted',
@@ -736,7 +745,7 @@ describe('pacer map', () => {
             ? jsonResponse(statusEnvelope(19, quotaMessage('hour', SERVER_USERNAME)))
             : unknownUser(),
       });
-      const service = makeService(fetch, { createPacer });
+      const service = makeService(fetch, { createPacer, now: fixedNow });
       const first = (await thrown(() => callTimezone(service))) as McpError;
       expect(first.data).toMatchObject({ reason: 'quota_exhausted', window: 'hour' });
 
@@ -761,7 +770,7 @@ describe('pacer map', () => {
             ? jsonResponse(TIMEZONE_PARIS_BODY)
             : unknownUser(),
       });
-      const service = makeService(fetch, { createPacer });
+      const service = makeService(fetch, { createPacer, now: fixedNow });
       const server = service.resolveAccount(undefined);
       const queued = Array.from({ length: 6 }, (_, index) =>
         service.timezone(index, index, server, ctx),
@@ -789,7 +798,7 @@ describe('pacer map', () => {
             ? (answers.shift() as Response)
             : unknownUser(),
       });
-      const service = makeService(fetch, { createPacer });
+      const service = makeService(fetch, { createPacer, now: fixedNow });
       const pending = callTimezone(service, CALLER_USERNAME);
       await vi.advanceTimersByTimeAsync(0);
       expect(fetch).toHaveBeenCalledTimes(1);
@@ -880,7 +889,12 @@ describe('cache', () => {
       'postalCodeSearchJSON',
       POSTAL_SEARCH_BODY,
       DAY,
-      (s) => s.postalSearch({ postalCode: '98101', limit: 5 }, s.resolveAccount(undefined), ctx),
+      (s) =>
+        s.postalSearch(
+          { postalCode: '98101', limit: 5, offset: 0 },
+          s.resolveAccount(undefined),
+          ctx,
+        ),
     ],
     [
       'postalNearby',
@@ -997,6 +1011,11 @@ describe('cache', () => {
     ['feature class', { query: 'x', featureClasses: ['P'], limit: 5, offset: 0 }],
     ['cities tier', { query: 'x', cities: 'cities1000', limit: 5, offset: 0 }],
     ['order', { query: 'x', orderBy: 'population', limit: 5, offset: 0 }],
+    ['explicit relevance order', { query: 'x', orderBy: 'relevance', limit: 5, offset: 0 }],
+    ['first-level admin code', { query: 'x', adminCode1: 'TX', limit: 5, offset: 0 }],
+    ['second-level admin code', { query: 'x', adminCode2: '033', limit: 5, offset: 0 }],
+    ['third-level admin code', { query: 'x', adminCode3: '923', limit: 5, offset: 0 }],
+    ['fourth-level admin code', { query: 'x', adminCode4: '92012', limit: 5, offset: 0 }],
     [
       'bounding box',
       { query: 'x', boundingBox: { north: 2, south: 1, east: 2, west: 1 }, limit: 5, offset: 0 },
@@ -1079,12 +1098,12 @@ describe('single-flight', () => {
     return { fetch, release };
   }
 
-  const tz = (service: GeoNamesService, username?: string, probe = ctx) =>
-    service.timezone(1, 2, service.resolveAccount(username), probe);
+  const tz = (service: GeoNamesService, username?: string) =>
+    service.timezone(1, 2, service.resolveAccount(username), ctx);
 
   it('shares one request among concurrent identical calls on one account', async () => {
     const { fetch, release } = gatedFetch(() => jsonResponse(TIMEZONE_PARIS_BODY));
-    const service = makeService(fetch);
+    const service = makeService(fetch, { now: fixedNow });
     const calls = [tz(service), tz(service), tz(service)];
     await Promise.resolve();
     release();
@@ -1096,7 +1115,7 @@ describe('single-flight', () => {
 
   it('starts a fresh request once the flight has landed', async () => {
     const { fetch, release } = gatedFetch(() => jsonResponse(TIMEZONE_PARIS_BODY));
-    const service = makeService(fetch);
+    const service = makeService(fetch, { now: fixedNow });
     const first = tz(service);
     await Promise.resolve();
     release();
@@ -1110,7 +1129,7 @@ describe('single-flight', () => {
 
   it('does not share across accounts', async () => {
     const { fetch, release } = gatedFetch(() => jsonResponse(TIMEZONE_PARIS_BODY));
-    const service = makeService(fetch);
+    const service = makeService(fetch, { now: fixedNow });
     const calls = [tz(service), tz(service, 'caller-a'), tz(service, 'caller-b')];
     await Promise.resolve();
     release();
@@ -1124,7 +1143,7 @@ describe('single-flight', () => {
         ? jsonResponse(statusEnvelope(10, 'invalid user'), 401)
         : jsonResponse(TIMEZONE_PARIS_BODY),
     );
-    const service = makeService(fetch);
+    const service = makeService(fetch, { now: fixedNow });
     const rejected = tz(service, 'caller-rejected').then(
       () => undefined,
       (error: unknown) => error,
@@ -1141,7 +1160,7 @@ describe('single-flight', () => {
     const { fetch, release } = gatedFetch(() =>
       jsonResponse(statusEnvelope(10, 'invalid user'), 401),
     );
-    const service = makeService(fetch);
+    const service = makeService(fetch, { now: fixedNow });
     const settle = (promise: Promise<unknown>) =>
       promise.then(
         () => undefined,
@@ -1164,41 +1183,196 @@ describe('single-flight', () => {
       jsonResponse(TIMEZONE_PARIS_BODY),
     ];
     const fetch = routedFetch({ timezoneJSON: () => answers.shift() as Response });
-    const service = makeService(fetch);
+    const service = makeService(fetch, { now: fixedNow });
     await thrown(() => tz(service, 'caller-a'));
     await expect(tz(service, 'caller-a')).resolves.toMatchObject({ timezoneId: 'Europe/Paris' });
   });
 
-  it('starts its own request when the leader it joined was cancelled', async () => {
-    const leaderController = new AbortController();
-    const leaderCtx = makeContext(leaderController.signal);
-    let call = 0;
-    const fetch = routedFetch({
-      timezoneJSON: (_url, init) => {
-        call++;
-        if (call > 1) return jsonResponse(TIMEZONE_PARIS_BODY);
-        return new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
-        });
-      },
+  describe('a caller leaving the shared request', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
     });
-    const service = makeService(fetch);
-    const leader = tz(service, undefined, leaderCtx).then(
-      () => undefined,
-      (error: unknown) => error,
-    );
-    await Promise.resolve();
-    const joiner = tz(service);
-    await Promise.resolve();
-    leaderController.abort(new Error('leader cancelled'));
-    expect(((await leader) as Error).message).toBe('leader cancelled');
-    await expect(joiner).resolves.toMatchObject({ timezoneId: 'Europe/Paris' });
-    expect(fetch).toHaveBeenCalledTimes(2);
+
+    /**
+     * A children fetch fake that holds each response until `release()`, then answers at
+     * once. A held request rejects with its signal's reason when that signal aborts, as
+     * `fetch` does.
+     */
+    function heldChildren(respond: () => Response = () => jsonResponse(CHILDREN_ENGLAND_BODY)) {
+      const gates: (() => void)[] = [];
+      let released = false;
+      const fetch = routedFetch({
+        childrenJSON: (_url, init) =>
+          released
+            ? respond()
+            : new Promise<Response>((resolve, reject) => {
+                init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+                gates.push(() => resolve(respond()));
+              }),
+      });
+      const release = () => {
+        released = true;
+        for (const open of gates.splice(0)) open();
+      };
+      /** The signal each request went out with, in request order. */
+      const requestSignals = () => fetch.mock.calls.map(([, init]) => init?.signal);
+      return { fetch, release, requestSignals };
+    }
+
+    /** How a call settled, readable without awaiting it. */
+    interface Settled {
+      status: 'pending' | 'fulfilled' | 'rejected';
+      value?: unknown;
+    }
+
+    /** Tracks a call's settlement; `done` resolves once it settles either way. */
+    function track(promise: Promise<unknown>) {
+      const state: Settled = { status: 'pending' };
+      const done = promise.then(
+        (value) => Object.assign(state, { status: 'fulfilled', value }),
+        (value: unknown) => Object.assign(state, { status: 'rejected', value }),
+      );
+      return { state, done };
+    }
+
+    /** A children call on the server account, under a context the test can cancel. */
+    function caller(service: GeoNamesService, signal?: AbortSignal) {
+      const controller = new AbortController();
+      const call = service.children(
+        '6269513',
+        'administrative',
+        service.resolveAccount(undefined),
+        makeContext(signal ?? controller.signal),
+      );
+      return { controller, ...track(call) };
+    }
+
+    /** Drains pending promise reactions without advancing any timer. */
+    const flush = async () => {
+      for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    };
+
+    it('keeps the one request running for the others when its first caller is cancelled', async () => {
+      const cacheSet = vi.spyOn(ResponseCache.prototype, 'set');
+      const { fetch, release, requestSignals } = heldChildren();
+      const service = makeService(fetch);
+      const [first, second, third] = [caller(service), caller(service), caller(service)];
+      await flush();
+      const reason = new Error('first caller went away');
+      first?.controller.abort(reason);
+      release();
+      await Promise.all([first?.done, second?.done, third?.done]);
+      expect(first?.state).toEqual({ status: 'rejected', value: reason });
+      expect(second?.state).toMatchObject({
+        status: 'fulfilled',
+        value: { children: [{ name: 'Greater London' }, { name: 'Kent' }] },
+      });
+      expect(third?.state.value).toBe(second?.state.value);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(requestSignals()[0]?.aborted).toBe(false);
+      expect(cacheSet).toHaveBeenCalledTimes(1);
+    });
+
+    it('starts no second request against the framework pacer', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const { fetch, release } = heldChildren();
+      const service = makeService(fetch, { createPacer, now: fixedNow });
+      const callers = [caller(service), caller(service), caller(service)];
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      callers[0]?.controller.abort(new Error('first caller went away'));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.all(callers.map(({ done }) => done));
+      expect(callers.map(({ state }) => state.status)).toEqual([
+        'rejected',
+        'fulfilled',
+        'fulfilled',
+      ]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      service.dispose();
+    });
+
+    it('rejects a caller cancelled mid-wait, or arriving cancelled, with its own reason at once', async () => {
+      const { fetch, release } = heldChildren();
+      const service = makeService(fetch);
+      const staying = caller(service);
+      const leaving = caller(service);
+      await flush();
+      const leavingReason = new Error('second caller went away');
+      leaving.controller.abort(leavingReason);
+      const cancelled = new AbortController();
+      const cancelledReason = new Error('already gone');
+      cancelled.abort(cancelledReason);
+      const arriving = caller(service, cancelled.signal);
+      await flush();
+      expect(leaving.state).toEqual({ status: 'rejected', value: leavingReason });
+      expect(arriving.state).toEqual({ status: 'rejected', value: cancelledReason });
+      expect(staying.state.status).toBe('pending');
+      release();
+      await staying.done;
+      expect(staying.state).toMatchObject({ status: 'fulfilled', value: { totalCount: 2 } });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('aborts the request only when its last caller leaves, and starts afresh for the next', async () => {
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        const { fetch, release, requestSignals } = heldChildren();
+        const service = makeService(fetch);
+        const callers = [caller(service), caller(service), caller(service)];
+        await flush();
+        const reasons = callers.map((_, index) => new Error(`caller ${index + 1} went away`));
+        callers[0]?.controller.abort(reasons[0]);
+        callers[1]?.controller.abort(reasons[1]);
+        await flush();
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(requestSignals()[0]?.aborted).toBe(false);
+        callers[2]?.controller.abort(reasons[2]);
+        expect(requestSignals()[0]?.aborted).toBe(true);
+        const next = caller(service);
+        await Promise.all(callers.map(({ done }) => done));
+        expect(callers.map(({ state }) => state)).toEqual(
+          reasons.map((value) => ({ status: 'rejected', value })),
+        );
+        release();
+        await next.done;
+        expect(next.state).toMatchObject({ status: 'fulfilled', value: { totalCount: 2 } });
+        expect(fetch).toHaveBeenCalledTimes(2);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
+    it('hands the shared failure to the callers still waiting after the first was cancelled', async () => {
+      const { fetch, release } = heldChildren(() =>
+        jsonResponse(statusEnvelope(14, 'bad parameter')),
+      );
+      const service = makeService(fetch);
+      const callers = [caller(service), caller(service), caller(service)];
+      await flush();
+      callers[0]?.controller.abort(new Error('first caller went away'));
+      release();
+      await Promise.all(callers.map(({ done }) => done));
+      expect(
+        callers.slice(1).map(({ state }) => [state.status, (state.value as McpError).data?.reason]),
+      ).toEqual([
+        ['rejected', 'upstream_rejected_parameter'],
+        ['rejected', 'upstream_rejected_parameter'],
+      ]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('passes a joiner its own failure when the leader failed for a reason other than cancellation', async () => {
     const { fetch, release } = gatedFetch(() => jsonResponse(statusEnvelope(14, 'bad parameter')));
-    const service = makeService(fetch);
+    const service = makeService(fetch, { now: fixedNow });
     const settle = (promise: Promise<unknown>) =>
       promise.then(
         () => undefined,

@@ -12,9 +12,10 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   blankAsUnset,
+  clampedLimitInput,
+  clampLimit,
   geonameIdInput,
   geonamesUsernameInput,
-  limitInput,
   lowerCased,
   nameContainsInput,
   nameMatcher,
@@ -24,7 +25,7 @@ import {
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import type { ChildHierarchy, ChildrenResult, Toponym } from '@/services/geonames/types.js';
-import { inlineText, tableCell } from '@/utils/inline-text.js';
+import { blockStartText, renderNotice, tableCell } from '@/utils/inline-text.js';
 
 const HIERARCHIES = [
   'administrative',
@@ -34,6 +35,9 @@ const HIERARCHIES = [
 
 /** The most rows `childrenJSON` is asked for per parent. */
 const FETCH_CAP = 1000;
+
+/** The most children one page returns; a larger `limit` is held to it. */
+const MAX_LIMIT = 500;
 
 const fallbackRule = (tree: ChildHierarchy) =>
   `GeoNames answers with the administrative children when a feature has no ${tree} tree`;
@@ -77,15 +81,15 @@ export const getChildrenTool = tool('geonames_get_children', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     geonameId: geonameIdInput.describe(
-      'GeoNames id of the parent feature, a positive integer up to 2147483647 such as 6252001 (United States), as returned in geonameId by the other geonames tools. A geonames.org/<id> URL is reduced to its id.',
+      'GeoNames id of the parent feature as a digit string up to 2147483647, such as "6252001" (United States): the geonameId the other geonames tools return, sent as a string.',
     ),
     hierarchy: blankAsUnset(lowerCased(z.enum(HIERARCHIES).default('administrative'))).describe(
-      "Which tree to descend: administrative (the default: continents (class L), countries, admin divisions, populated places), tourism (islands (class T), coasts (class L), and their municipalities; almost all in Spain), or dependency (a country's dependent territories). For a feature with no tourism or dependency tree, GeoNames answers with its administrative children, which sameAsAdministrative flags; the comparison reads the administrative list, 1 more credit unless it is cached. Case-insensitive.",
+      "Which tree to descend: administrative (the default: continents (class L), countries, admin divisions, populated places), tourism (islands (class T), coasts (class L), and their municipalities; almost all in Spain), or dependency (a country's dependent territories). For a feature with no tourism or dependency tree, GeoNames answers with its administrative children, which sameAsAdministrative flags; the comparison reads the administrative list, 1 more credit unless it is cached.",
     ),
     nameContains: nameContainsInput.describe(
       'Keep only children whose name or toponym name contains every word of this text as a substring (kansas also matches Arkansas), ignoring case, accents, and punctuation.',
     ),
-    limit: limitInput(500, 100),
+    limit: clampedLimitInput(MAX_LIMIT, 100),
     offset: offsetInput(),
     geonamesUsername: geonamesUsernameInput,
   }),
@@ -165,14 +169,15 @@ export const getChildrenTool = tool('geonames_get_children', {
     totalCount: z.number().describe('Children matching nameContains, before paging.'),
     truncated: z.boolean().describe('True when more children remain past this page.'),
     shown: z.number().describe('Children returned on this page.'),
-    cap: z.number().describe('The limit that was applied.'),
+    cap: z.number().describe('The limit applied: limit as given, or 500 when it asked for more.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when a tourism or dependency answer is the administrative children, there are no children, nothing matched, the offset is past the end, more pages remain, or GeoNames holds more children than it returns.',
+        'Guidance when a tourism or dependency answer is the administrative children, there are no children, nothing matched, the offset is past the end, more pages remain (naming a limit held to 500), or GeoNames holds more children than it returns.',
       ),
   },
+  enrichmentTrailer: { notice: { render: renderNotice } },
   errors: [
     {
       reason: 'username_required',
@@ -221,8 +226,9 @@ export const getChildrenTool = tool('geonames_get_children', {
   ],
 
   async handler(input, ctx) {
+    const limit = clampLimit(input.limit, MAX_LIMIT);
     ctx.enrich.total(0);
-    ctx.enrich({ truncated: false, shown: 0, cap: input.limit });
+    ctx.enrich({ truncated: false, shown: 0, cap: limit.applied });
     const { hierarchy } = input;
     const parentGeonameId = Number(input.geonameId);
     const service = getGeoNamesService();
@@ -248,7 +254,7 @@ export const getChildrenTool = tool('geonames_get_children', {
           );
     const matcher = input.nameContains === undefined ? undefined : nameMatcher(input.nameContains);
     const matches = matcher ? all.filter((child) => matcher([child.name, child.toponymName])) : all;
-    const { page, nextOffset } = paginate(matches, input.offset, input.limit);
+    const { page, nextOffset } = paginate(matches, input.offset, limit.applied);
 
     ctx.enrich.total(matches.length);
     ctx.enrich({ shown: page.length });
@@ -266,7 +272,7 @@ export const getChildrenTool = tool('geonames_get_children', {
       );
     } else if (matches.length === 0 && input.nameContains !== undefined) {
       fragments.push(
-        `No child name contains "${inlineText(input.nameContains)}" among ${all.length}; call again without nameContains to browse them all.`,
+        `No child name contains "${input.nameContains}" among ${all.length}; call again without nameContains to browse them all.`,
       );
     } else if (page.length === 0) {
       fragments.push(
@@ -275,7 +281,8 @@ export const getChildrenTool = tool('geonames_get_children', {
     }
     if (nextOffset !== undefined) {
       const remaining = matches.length - nextOffset;
-      ctx.enrich.truncated({ shown: page.length, cap: input.limit });
+      ctx.enrich.truncated({ shown: page.length, cap: limit.applied });
+      if (limit.fragment !== undefined) fragments.push(limit.fragment);
       fragments.push(
         `${remaining} more ${remaining === 1 ? 'child' : 'children'}; call again with offset ${nextOffset}.`,
       );
@@ -309,7 +316,7 @@ export const getChildrenTool = tool('geonames_get_children', {
     if (result.sameAsAdministrative !== undefined) {
       lines.push('', `**Same as administrative children:** ${result.sameAsAdministrative}`);
     }
-    if (result.guidance !== undefined) lines.push('', inlineText(result.guidance));
+    if (result.guidance !== undefined) lines.push('', blockStartText(result.guidance));
     if (result.found && result.children.length === 0) {
       lines.push('', 'No children on this page.');
     }

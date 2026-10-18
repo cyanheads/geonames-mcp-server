@@ -1,6 +1,6 @@
 /**
  * @fileoverview geonames_search_places — searches the GeoNames gazetteer by name and
- * filters (country, feature class or code, population tier, bounding box) through
+ * filters (country, admin code, feature class or code, population tier, bounding box) through
  * `searchJSON`, one credit a call, cached for an hour.
  * @module mcp-server/tools/definitions/search-places.tool
  */
@@ -10,27 +10,32 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   blankAsUnset,
   citiesInput,
+  clampedLimitInput,
+  clampLimit,
   countriesInput,
   featureClassesInput,
   featureCodesInput,
   featureFilterMismatch,
   geonamesUsernameInput,
   isBlank,
-  limitInput,
   lowerCased,
   offsetInput,
   USERNAME_ALIASES,
   unknownCountryCodes,
+  unlistedCountriesFragment,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getFeatureCode } from '@/services/geonames/feature-codes.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import type { SearchMatch, Toponym } from '@/services/geonames/types.js';
-import { inlineText, tableCell } from '@/utils/inline-text.js';
+import { inlineText, renderNotice, tableCell } from '@/utils/inline-text.js';
 
 const MATCHES = ['name_required', 'any_field', 'exact_name', 'name_prefix'] as const;
 
 /** GeoNames' free service pages no further than `startRow=5000` (status 25 beyond). */
 const MAX_OFFSET = 5000;
+
+/** Most places a call returns. GeoNames allows `maxRows=1000`; 100 keeps a page near 45 KB. */
+const MAX_LIMIT = 100;
 
 /** The search row as this tool returns it: the gazetteer fields minus nearby and country-id extras. */
 const toPlace = ({ countryGeonameId: _countryId, distanceInKm: _distance, ...place }: Toponym) =>
@@ -59,19 +64,81 @@ const bound = () =>
         : undefined,
   });
 
+/**
+ * An admin code as GeoNames writes it, 1 to 20 letters or digits. It is trimmed and its
+ * ASCII letters upper-cased before the pattern runs, otherwise kept verbatim, since zero
+ * padding is significant (`02` is Bavaria, `2` matches nothing). The advertised pattern
+ * admits the whitespace and lower case that normalization removes, so a validating client
+ * sends every form the tool accepts; only ASCII is upper-cased, so a letter whose upper
+ * case is ASCII (`ſ`) stays refused, as the pattern refuses it.
+ */
+const adminCodeInput = (description: string) =>
+  blankAsUnset(
+    z.preprocess(
+      (value: unknown) =>
+        typeof value === 'string'
+          ? value.replace(/[a-z]+/g, (letters) => letters.toUpperCase())
+          : value,
+      z
+        .string()
+        .regex(/^\s*[A-Za-z0-9]{1,20}\s*$/)
+        .optional(),
+    ),
+  ).describe(description);
+
+const LIST = new Intl.ListFormat('en', { type: 'conjunction' });
+
+/** What an unscoped admin code lacks: its first-level code, a single country, or both. */
+type AdminScopeGap = 'adminCode1' | 'countries';
+
+/** The admin_code_unscoped message: the codes given, what they lack, and why it matters. */
+function unscopedMessage(
+  codes: readonly string[],
+  missing: readonly AdminScopeGap[],
+  countries: readonly string[],
+): string {
+  const needsCountry = missing.includes('countries');
+  const needs = [
+    missing.includes('adminCode1') && 'adminCode1',
+    needsCountry && 'exactly one country in countries',
+  ].filter(Boolean);
+  const why =
+    missing.length === 2
+      ? 'admin codes repeat across countries and lower-level codes across first-level divisions'
+      : needsCountry
+        ? 'admin codes repeat across countries'
+        : 'lower-level codes repeat across first-level divisions';
+  const has = needsCountry
+    ? `; countries has ${countries.length === 0 ? 'none' : countries.join(', ')}`
+    : '';
+  return `${LIST.format(codes)} ${codes.length === 1 ? 'needs' : 'need'} ${needs.join(' and ')}, since ${why}${has}.`;
+}
+
 export const searchPlacesTool = tool('geonames_search_places', {
   title: 'Search GeoNames places',
   description:
-    'Search the GeoNames gazetteer of 13M+ places by name and filters: country, feature class (P populated places, A admin divisions, T mountains and terrain, H water, S buildings and spots), feature code (PPLC capitals, ADM1 states, MT mountains, AIRP airports), population tier, and bounding box. Results carry the geonameId that geonames_get_place, geonames_get_hierarchy, and geonames_get_children take. The default match requires a query term in the place name while letting other terms match the country or admin names ("Berlin, Germany"). Costs 1 GeoNames credit per call.',
+    'Search the GeoNames gazetteer of 13M+ places by name and filters: country, admin division by its GeoNames code (adminCode1 TX with countries US for Texas), feature class (P populated places, A admin divisions, T mountains and terrain, H water, S buildings and spots), feature code (PPLC capitals, ADM1 states, MT mountains, AIRP airports), population tier, and bounding box. Results carry the geonameId that geonames_get_place, geonames_get_hierarchy, and geonames_get_children take. The default match requires a query term in the place name while letting other terms match the country or admin names ("Berlin, Germany"). Costs 1 GeoNames credit per call.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: blankAsUnset(z.string().max(200).optional()).describe(
       'Place name to search for, such as Springfield or "Berlin, Germany", up to 200 characters. match sets how it is compared. Omit it to search by filters alone, which then needs at least one of countries, featureClasses, featureCodes, or boundingBox (cities alone is not enough).',
     ),
     match: blankAsUnset(lowerCased(z.enum(MATCHES).optional())).describe(
-      'How query is matched. name_required (the default) needs at least one query term in the place name while other terms may match the country or admin names; any_field lets every term match any of those fields; exact_name matches the whole name exactly, alternate and historical names included; name_prefix matches names that start with query. Needs query. Case-insensitive.',
+      'How query is matched. name_required (the default) needs at least one query term in the place name while other terms may match the country or admin names; any_field lets every term match any of those fields; exact_name matches the whole name exactly, alternate and historical names included; name_prefix matches names that start with query. Needs query.',
     ),
     countries: countriesInput,
+    adminCode1: adminCodeInput(
+      'First-level admin division (state, province, region) to search inside, by its GeoNames admin code: TX is Texas in US. Take it from geonames_get_place or geonames_reverse_geocode (adminLevels[].code at level 1), or from adminCode1 on rows of geonames_search_places, geonames_get_hierarchy, and geonames_get_children. GeoNames codes are neither ISO 3166-2 nor postal admin codes: Bavaria is 02, not BY. Needs exactly one country in countries. 1 to 20 letters or digits, zero padding kept (02, not 2). Case-insensitive.',
+    ),
+    adminCode2: adminCodeInput(
+      'Second-level admin division (a US county, a French département) to search inside, by its GeoNames admin code: 033 is King County in WA. Take it from geonames_get_place or geonames_reverse_geocode (adminLevels[].code at level 2). Needs adminCode1 and exactly one country in countries. 1 to 20 letters or digits, zero padding kept (033, not 33). Case-insensitive.',
+    ),
+    adminCode3: adminCodeInput(
+      'Third-level admin division to search inside, by its GeoNames admin code: 09162 is Munich in DE. Take it from geonames_get_place or geonames_reverse_geocode (adminLevels[].code at level 3). Needs adminCode1 and exactly one country in countries. 1 to 20 letters or digits, zero padding kept. Case-insensitive.',
+    ),
+    adminCode4: adminCodeInput(
+      'Fourth-level admin division to search inside, by its GeoNames admin code: 92012 is Boulogne-Billancourt in FR. Take it from geonames_get_place or geonames_reverse_geocode (adminLevels[].code at level 4). Needs adminCode1 and exactly one country in countries. 1 to 20 letters or digits, zero padding kept. Case-insensitive.',
+    ),
     featureClasses: featureClassesInput,
     featureCodes: featureCodesInput,
     cities: citiesInput,
@@ -101,9 +168,9 @@ export const searchPlacesTool = tool('geonames_search_places', {
       'Keep only places inside this box. The box cannot cross the 180° meridian: split such an area into two searches.',
     ),
     orderBy: blankAsUnset(lowerCased(z.enum(['relevance', 'population']).optional())).describe(
-      "Result order: relevance (GeoNames' default) or population, largest first. Case-insensitive.",
+      "Result order: relevance or population, largest first. Omit it for GeoNames' own order, which matches relevance except with match name_prefix.",
     ),
-    limit: limitInput(100, 10),
+    limit: clampedLimitInput(MAX_LIMIT, 10),
     offset: offsetInput(MAX_OFFSET),
     geonamesUsername: geonamesUsernameInput,
   }),
@@ -181,8 +248,17 @@ export const searchPlacesTool = tool('geonames_search_places', {
       .describe('The match mode, query, and filters as the server sent them to GeoNames.'),
     truncated: z.boolean().describe('True when more matching places remain past this page.'),
     shown: z.number().describe('Places returned on this page.'),
-    cap: z.number().describe('The limit that was applied.'),
-    notice: z.string().optional().describe('Guidance when nothing matched or more pages remain.'),
+    cap: z.number().describe('The limit applied: limit as given, or 100 when it asked for more.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance: why nothing matched, or how to reach the next page (naming a limit held to 100), and which places on the page lie in countries that countries does not list.',
+      ),
+  },
+  enrichmentTrailer: {
+    effectiveQuery: { render: (value) => `**effectiveQuery:** ${inlineText(value)}` },
+    notice: { render: renderNotice },
   },
   errors: [
     {
@@ -204,7 +280,7 @@ export const searchPlacesTool = tool('geonames_search_places', {
     {
       reason: 'unknown_country_code',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A countries entry is a well-formed alpha-3 or three-digit numeric code that no country has.',
+      when: 'A countries entry, once mapped to alpha-2, is none of the 250 country codes or the retired AN, CS, and YU: an alpha-2 such as EL or EU, or an unassigned alpha-3 or numeric code.',
       recovery:
         'Find the country with geonames_get_countries (nameContains matches its name), then call again with its alpha-2, alpha-3, or numeric code.',
       severity: 'notice',
@@ -215,6 +291,14 @@ export const searchPlacesTool = tool('geonames_search_places', {
       when: 'A featureCodes entry is not a GeoNames feature code.',
       recovery:
         'Look up valid codes with geonames_list_reference topic feature_codes, then retry with a listed code.',
+      severity: 'notice',
+    },
+    {
+      reason: 'admin_code_unscoped',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'An admin code is set without exactly one country in countries, or adminCode2 to adminCode4 without adminCode1: codes repeat across countries, and lower-level codes across first-level divisions.',
+      recovery:
+        'Call geonames_search_places again with exactly one country in countries and, beside adminCode2 to adminCode4, the adminCode1 they belong to; geonames_get_place lists the codes of every level in adminLevels.',
       severity: 'notice',
     },
     {
@@ -280,11 +364,18 @@ export const searchPlacesTool = tool('geonames_search_places', {
 
   async handler(input, ctx) {
     const { query, countries, featureClasses, featureCodes, cities, boundingBox, orderBy } = input;
+    const { adminCode1, adminCode2, adminCode3, adminCode4 } = input;
     const match: SearchMatch | undefined =
       query === undefined ? undefined : (input.match ?? 'name_required');
+    /** The admin codes given, first level first, each as `adminCodeN CODE`. */
+    const adminCodes = Object.entries({ adminCode1, adminCode2, adminCode3, adminCode4 }).flatMap(
+      ([name, code]) => (code === undefined ? [] : [`${name} ${code}`]),
+    );
+    const limit = clampLimit(input.limit, MAX_LIMIT);
     const effectiveQuery = [
-      query === undefined ? undefined : `${match} "${inlineText(query)}"`,
+      query === undefined ? undefined : `${match} "${query}"`,
       countries && `countries ${countries.join(',')}`,
+      ...adminCodes,
       featureClasses && `featureClasses ${featureClasses.join(',')}`,
       featureCodes && `featureCodes ${featureCodes.join(',')}`,
       cities && `cities ${cities}`,
@@ -294,7 +385,7 @@ export const searchPlacesTool = tool('geonames_search_places', {
     ]
       .filter(Boolean)
       .join(' · ');
-    ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: input.limit, effectiveQuery });
+    ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: limit.applied, effectiveQuery });
 
     if (input.match !== undefined && query === undefined) {
       throw ctx.fail('query_required', `match ${input.match} needs query text to match.`);
@@ -308,7 +399,7 @@ export const searchPlacesTool = tool('geonames_search_places', {
     ) {
       throw ctx.fail(
         'query_or_filter_required',
-        `geonames_search_places needs query or a narrowing filter (countries, featureClasses, featureCodes, boundingBox)${cities === undefined ? '' : '; cities alone does not narrow enough'}.`,
+        `geonames_search_places needs query or a narrowing filter (countries, featureClasses, featureCodes, boundingBox)${cities === undefined ? '' : '; cities alone does not narrow enough'}${adminCodes.length === 0 ? '' : '; admin codes also need exactly one country in countries'}.`,
       );
     }
     const unknownCountries = unknownCountryCodes(countries);
@@ -323,6 +414,18 @@ export const searchPlacesTool = tool('geonames_search_places', {
         `Not a GeoNames feature code: ${unknownCodes.join(', ')}.`,
         { featureCodes: unknownCodes },
       );
+    }
+    if (adminCodes.length > 0) {
+      const scope = [...new Set(countries)];
+      const missing = [
+        adminCode1 === undefined && 'adminCode1',
+        scope.length !== 1 && 'countries',
+      ].filter((gap): gap is AdminScopeGap => gap !== false);
+      if (missing.length > 0) {
+        throw ctx.fail('admin_code_unscoped', unscopedMessage(adminCodes, missing, scope), {
+          missing,
+        });
+      }
     }
     const mismatch = featureFilterMismatch({ featureClasses, featureCodes, cities });
     if (mismatch !== undefined) {
@@ -351,11 +454,15 @@ export const searchPlacesTool = tool('geonames_search_places', {
     const service = getGeoNamesService();
     const { places, totalCount } = await service.search(
       {
-        limit: input.limit,
+        limit: limit.applied,
         offset: input.offset,
         query,
         match,
         countries,
+        adminCode1,
+        adminCode2,
+        adminCode3,
+        adminCode4,
         featureClasses,
         featureCodes,
         cities,
@@ -371,36 +478,45 @@ export const searchPlacesTool = tool('geonames_search_places', {
     const more = shown > 0 && next < totalCount;
     /** Past the cap, offset 5000 is still a page: it repeats this page's tail, then reaches row `next`. */
     const nextOffset = more && input.offset < MAX_OFFSET ? Math.min(next, MAX_OFFSET) : undefined;
+    /** The notice's fragments: clamp, continuation, outside countries; or the zero-hit notice alone. */
+    const fragments: string[] = [];
     ctx.enrich.total(totalCount);
     ctx.enrich({ shown });
     if (more) {
+      ctx.enrich.truncated({ shown, cap: limit.applied });
       const remaining = `${(totalCount - next).toLocaleString('en-US')} more ${totalCount - next === 1 ? 'place' : 'places'}`;
       const repeated = next - MAX_OFFSET;
-      ctx.enrich.truncated({
-        shown,
-        cap: input.limit,
-        guidance:
-          nextOffset === undefined
-            ? "GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries, featureCodes, or boundingBox to reach the rest."
-            : nextOffset < next
-              ? `${remaining}; call again with offset ${MAX_OFFSET}, the last offset GeoNames' free service accepts (its first ${repeated} ${repeated === 1 ? 'row repeats' : 'rows repeat'} this page).`
-              : `${remaining}; call again with offset ${next}.`,
-      });
+      if (limit.fragment !== undefined) fragments.push(limit.fragment);
+      fragments.push(
+        nextOffset === undefined
+          ? "GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries, featureCodes, or boundingBox to reach the rest."
+          : nextOffset < next
+            ? `${remaining}; call again with offset ${MAX_OFFSET}, the last offset GeoNames' free service accepts (its first ${repeated} ${repeated === 1 ? 'row repeats' : 'rows repeat'} this page).`
+            : `${remaining}; call again with offset ${next}.`,
+      );
     }
+    const unlisted = unlistedCountriesFragment(
+      places.map(({ countryCode }) => countryCode),
+      countries,
+      'place',
+    );
+    if (unlisted !== undefined) fragments.push(unlisted);
     if (shown === 0) {
-      ctx.enrich.notice(
+      fragments.push(
         totalCount > 0
           ? `offset ${input.offset} is past the last result (${totalCount}); call again with a smaller offset.`
           : [
               `No GeoNames place matched ${effectiveQuery}.`,
               match === 'exact_name' &&
-                `No place is named exactly "${inlineText(query ?? '')}"; retry with match name_prefix or name_required.`,
+                `No place is named exactly "${query ?? ''}"; retry with match name_prefix or name_required.`,
               match === 'name_required' &&
                 'At least one query term must appear in the place name; retry with match any_field to also match country and admin names.',
               (featureCodes || featureClasses) &&
                 'The feature filter may be too narrow; drop it, or check codes with geonames_list_reference topic feature_codes.',
               countries &&
-                `Only ${countries.join(', ')} were searched, and a code GeoNames does not know matches nothing; check the codes with geonames_get_countries, or drop countries to search worldwide.`,
+                `Only ${countries.join(', ')} were searched; check the codes with geonames_get_countries, or drop countries to search worldwide.`,
+              adminCodes.length > 0 &&
+                `Only places with ${adminCodes.join(', ')} were searched; admin codes match exactly, zero padding included: copy them from adminLevels of geonames_get_place, or drop the deepest to widen the search.`,
               boundingBox &&
                 'Only places inside the bounding box were searched; widen or drop boundingBox.',
               cities && `${cities} excludes smaller populated places; drop cities to include them.`,
@@ -409,6 +525,7 @@ export const searchPlacesTool = tool('geonames_search_places', {
               .join(' '),
       );
     }
+    if (fragments.length > 0) ctx.enrich.notice(fragments.join(' '));
 
     return { places: places.map(toPlace), ...(nextOffset === undefined ? {} : { nextOffset }) };
   },

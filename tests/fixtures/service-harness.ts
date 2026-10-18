@@ -178,18 +178,29 @@ export function sheddingCreatePacer(retryAfter?: number, remainingMs = 0): typeo
 }
 
 /**
+ * A fixed service clock for tests that reach `timezoneJSON`, whose `date` parameter follows
+ * the clock, so no test's requests depend on when the suite runs.
+ */
+export const FIXED_NOW = Date.parse('2026-10-18T06:00:00Z');
+
+/** The service clock option pinned at {@link FIXED_NOW}. */
+export const fixedNow = (): number => FIXED_NOW;
+
+/**
  * Points the process-wide service at `routes`, the way a tool test needs it, and returns
- * the fetch fake. `server: false` leaves the service with no server account.
+ * the fetch fake. `server: false` leaves the service with no server account; `now` is the
+ * service clock (default `Date.now`).
  */
 export function installService(
   routes: Record<string, Responder> = {},
-  options: { createPacer?: typeof createPacer; server?: boolean } = {},
+  options: { createPacer?: typeof createPacer; now?: () => number; server?: boolean } = {},
 ) {
   const fetchFake = routedFetch(routes);
   initGeoNamesService({
     baseUrl: BASE_URL,
     createPacer: options.createPacer ?? inertCreatePacer,
     fetch: fetchFake,
+    ...(options.now ? { now: options.now } : {}),
     ...(options.server === false ? {} : { serverUsername: SERVER_USERNAME }),
   });
   return fetchFake;

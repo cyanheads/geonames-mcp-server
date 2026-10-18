@@ -2,10 +2,10 @@
 
 **Server:** geonames-mcp-server
 **Version:** 0.1.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.10`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -57,7 +57,7 @@ import {
   USERNAME_ALIASES,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
-import { inlineText } from '@/utils/inline-text.js';
+import { blockStartText, tableCell } from '@/utils/inline-text.js';
 
 export const getHierarchyTool = tool('geonames_get_hierarchy', {
   title: 'Get a GeoNames hierarchy',
@@ -108,7 +108,7 @@ export const getHierarchyTool = tool('geonames_get_hierarchy', {
     return { found: true, geonameId, chain: chain.map(toLink) };
   },
 
-  // GeoNames-authored text reaches content[] only through inlineText() / tableCell().
+  // GeoNames-authored text reaches content[] only through inlineText() / blockStartText() / tableCell().
   format: (result) => [{ type: 'text', text: /* heading, breadcrumb, table */ '' }],
 });
 ```
@@ -188,7 +188,7 @@ Handlers receive a unified `ctx` object. Key properties:
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible: never log a GeoNames username or a request URL. |
 | `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). Tools here write every required field at the top of the handler with a neutral value (`totalCount: 0`, `truncated: false`, `shown: 0`, `cap`), and write the composed `notice` last, since `.truncated()` also writes one and the last write wins. |
 | `ctx.fail` | Throws a declared contract `reason` — `throw ctx.fail('query_required', message)`. Typed against the tool's `errors[]`. |
-| `ctx.signal` | `AbortSignal` for cancellation; the service passes it to its retry ladder and fetch. |
+| `ctx.signal` | `AbortSignal` for cancellation. The service races each call's shared request against it, so a cancelled call rejects at once with its own `signal.reason`; the retry ladder and fetch run on the single-flight's own signal, aborted only when no caller still waits. |
 | `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
 
 ---
@@ -257,12 +257,12 @@ src/
       types.ts                          # Domain types
   mcp-server/
     tools/
-      shared-inputs.ts                  # Shared input schemas, list/blank preprocessing, pre-request checks, paging
+      shared-inputs.ts                  # Shared input schemas, list/blank preprocessing, pre-request checks, the limit clamp, paging, the unlisted-countries notice fragment
       definitions/
         index.ts                        # allToolDefinitions barrel
         [tool-name].tool.ts             # The eight geonames_* tools
   utils/
-    inline-text.ts                      # Sanitizer for GeoNames-authored text in format()
+    inline-text.ts                      # Sanitizer for GeoNames-authored text in format() and enrichment trailer renders
 ```
 
 ---
@@ -399,7 +399,7 @@ security: false                            # optional — true ONLY for a source
 
 ## Publishing
 
-**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the changelog entry plus a gates section); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
+**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the release digest: theme line, `## Changes`, `## Gates`, changelog link last); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
 
 ---
 
@@ -425,12 +425,12 @@ import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 - [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
 - [ ] GeoNames wrapping: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
-- [ ] GeoNames wrapping: normalization and `format()` preserve uncertainty; placeholders (`population: 0`, `geonameId: 0`, empty strings, `adminCode1: "00"`) are dropped, never passed on as facts
+- [ ] GeoNames wrapping: normalization and `format()` preserve uncertainty; placeholders (`population: 0`, `geonameId: 0`, empty strings, `adminCode1: "00"` with no admin id) are dropped, never passed on as facts; a `00` sent with an admin id is Monaco's real code and kept; a country record (its `countryId` its own geonameId) lists no admin level
 - [ ] GeoNames wrapping: tests include at least one sparse payload case with omitted upstream fields
 - [ ] New upstream parameters added to that endpoint's allowlist in `GeoNamesService` — GeoNames silently ignores a parameter it does not know
 - [ ] Every tool takes `geonamesUsername` (with `inputAliases: USERNAME_ALIASES`) and declares the five common error entries inline with `thrownBy: 'service'`
 - [ ] No GeoNames username in `ctx.log`, `ctx.state`, cache keys, output, enrichment, or error text
-- [ ] GeoNames-authored text rendered through `inlineText()` / `tableCell()` in `format()`; credit costs in tool descriptions match `docs/design.md`
+- [ ] GeoNames-authored text rendered in `format()` through `inlineText()` inside a line, `blockStartText()` where it opens a line (heading, list item, block quote, its own line), or `tableCell()`; enrichment values stay raw in `structuredContent`, escaped only by an `enrichmentTrailer` render; credit costs in tool descriptions match `docs/design.md`
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description

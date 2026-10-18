@@ -1,7 +1,8 @@
 /**
  * @fileoverview geonames_find_postal_codes — postal codes by code or place name
- * (`postalCodeSearchJSON`, 1 credit) or near a coordinate (`findNearbyPostalCodesJSON`,
- * 2 credits), both cached a day.
+ * (`postalCodeSearchJSON`, 1 credit, paged by offset) or near a coordinate
+ * (`findNearbyPostalCodesJSON`, 2 credits), both cached a day. A `limit` above 100 is held to
+ * 100, and each call asks for one row past the page, which alone says whether more remain.
  * @module mcp-server/tools/definitions/find-postal-codes.tool
  */
 
@@ -10,23 +11,29 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { logger, withExtra } from '@cyanheads/mcp-ts-core/utils';
 import {
   blankAsUnset,
+  clampedLimitInput,
+  clampLimit,
   countriesInput,
   geonamesUsernameInput,
   latInput,
-  limitInput,
   lngInput,
   lowerCased,
+  offsetInput,
   USERNAME_ALIASES,
   unknownCountryCodes,
+  unlistedCountriesFragment,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { type GeoNamesAccount, getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import { reasonOf } from '@/services/geonames/upstream-errors.js';
-import { inlineText, tableCell } from '@/utils/inline-text.js';
+import { renderNotice, tableCell } from '@/utils/inline-text.js';
 
 const MODES = ['code', 'place_name', 'nearby'] as const;
 
-/** The most rows one call returns. */
+/** The most rows one call returns; a larger `limit` is held to it. */
 const MAX_LIMIT = 100;
+
+/** GeoNames' free service pages postal searches no further than `startRow=5000` (status 14 beyond). */
+const MAX_OFFSET = 5000;
 
 /** GeoNames' free-tier ceiling on the nearby postal radius (status 24 beyond). */
 const MAX_RADIUS_KM = 30;
@@ -56,7 +63,7 @@ async function uncoveredCountries(
       withExtra(ctx, {
         reason: reasonOf(error),
         code: error instanceof McpError ? error.code : undefined,
-        account: account.source,
+        payer: account.source,
       }),
     );
     return [];
@@ -72,11 +79,11 @@ const division = (name?: string, code?: string, iso?: string): string =>
 export const findPostalCodesTool = tool('geonames_find_postal_codes', {
   title: 'Find GeoNames postal codes',
   description:
-    'Look up postal codes in the GeoNames postal database (122 countries): mode code resolves a postal code to its place, admin names, and centroid; mode place_name finds postal codes for a place name; mode nearby lists postal codes within radiusKm (up to 30 km) of a coordinate, nearest first. Ireland returns only Eircode routing keys and Malta only the letter prefix; the United Kingdom (GB), Canada, and the Netherlands hold both full codes and their outward or district prefixes. Check coverage with geonames_list_reference topic postal_countries. Costs 1 GeoNames credit (2 for nearby); cached.',
+    'Look up postal codes in the GeoNames postal database (122 countries): mode code resolves a postal code to its place, admin names, and centroid; mode place_name finds postal codes for a place name; both page with offset, up to 5000; mode nearby lists postal codes within radiusKm (up to 30 km) of a coordinate, nearest first. Ireland returns only Eircode routing keys and Malta only the letter prefix; the United Kingdom (GB), Canada, and the Netherlands hold both full codes and their outward or district prefixes. Check coverage with geonames_list_reference topic postal_countries. Costs 1 GeoNames credit (2 for nearby); a code or place_name lookup with countries that returns nothing at offset 0 also reads the postal coverage list, 1 more credit unless that list is cached. Repeat lookups are cached.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     mode: lowerCased(z.enum(MODES)).describe(
-      'What to look up. code: the place for postalCode (required). place_name: the postal codes of placeName (required). nearby: postal codes around lat and lng (both required; countries not accepted). Case-insensitive.',
+      'What to look up. code: the place for postalCode (required). place_name: the postal codes of placeName (required). nearby: postal codes around lat and lng (both required; countries not accepted).',
     ),
     postalCode: blankAsUnset(
       z.preprocess(
@@ -88,7 +95,7 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
           .optional(),
       ),
     ).describe(
-      'Postal code to resolve, such as 98101, SW1A 1AA, or K1A 0A1: letters, digits, spaces, and hyphens, up to 12 characters. Case and extra spaces are normalized. Required in mode code; in mode place_name it narrows the match; not used in mode nearby.',
+      'Postal code to resolve, such as 98101, SW1A 1AA, or K1A 0A1: capital letters, digits, spaces, and hyphens, up to 12 characters. Required in mode code; in mode place_name it narrows the match; not used in mode nearby.',
     ),
     placeName: blankAsUnset(z.string().max(100).optional()).describe(
       'Place name to find postal codes for, up to 100 characters. GeoNames matches it against place, admin, and country names. Required in mode place_name; in mode code it narrows the match; not used in mode nearby.',
@@ -103,9 +110,12 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
       "Search radius in kilometres for mode nearby, above 0 and at most 30 (GeoNames' free-tier limit). Default 10.",
     ),
     countries: countriesInput.describe(
-      'Keep only postal codes in these countries: ISO 3166-1 codes, up to 10, as a list or a comma-separated string: alpha-2 (US, GB, DE), alpha-3 (USA, GBR, DEU), or three-digit numeric (840, 826, 276), each sent to GeoNames as alpha-2. Case-insensitive; UK is accepted for GB. Modes code and place_name only.',
+      "Countries to look up postal codes in: ISO 3166-1 codes, up to 10, as a list: alpha-2 (US, GB, DE), alpha-3 (USA, GBR, DEU), or three-digit numeric (840, 826, 276), each sent to GeoNames as alpha-2. UK is accepted for GB and FL for LI. A listed country also returns the territories GeoNames files under it (GB also returns IM, JE, and GG), each postal code's countryCode naming its own country. Modes code and place_name only.",
     ),
-    limit: limitInput(MAX_LIMIT, 10),
+    limit: clampedLimitInput(MAX_LIMIT, 10),
+    offset: offsetInput(MAX_OFFSET).describe(
+      'Postal codes to skip before the first one returned, 0 to 5000. Default 0. Modes code and place_name only; pass the nextOffset of the previous page to read the next one.',
+    ),
     geonamesUsername: geonamesUsernameInput,
   }),
   inputAliases: USERNAME_ALIASES,
@@ -157,32 +167,43 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
           })
           .describe('One postal code.'),
       )
-      .describe('Matching postal codes; nearest first in mode nearby.'),
+      .describe('Matching postal codes on this page; nearest first in mode nearby.'),
+    nextOffset: z
+      .number()
+      .optional()
+      .describe(
+        "Offset of the next page in modes code and place_name; absent on the last page, in mode nearby, and once offset is 5000. Capped at 5000, the last offset GeoNames' free service accepts, so that page can repeat rows of this one.",
+      ),
   }),
   enrichment: {
     truncated: z
       .boolean()
-      .describe('True when a full page came back: GeoNames reports no total, so more may match.'),
-    shown: z.number().describe('Postal codes returned.'),
-    cap: z.number().describe('The limit that was applied.'),
+      .describe(
+        'True when more postal codes remain past this page; in mode nearby, more lie within radiusKm.',
+      ),
+    shown: z.number().describe('Postal codes returned on this page.'),
+    cap: z.number().describe('The limit applied: limit as given, or 100 when it asked for more.'),
     notice: z
       .string()
       .optional()
-      .describe('Guidance when nothing matched, or when a full page suggests more matches.'),
+      .describe(
+        'Guidance: why nothing matched or nothing lies at offset, or how to reach the postal codes past this page (naming a limit held to 100), and which postal codes on the page lie in countries that countries does not list.',
+      ),
   },
+  enrichmentTrailer: { notice: { render: renderNotice } },
   errors: [
     {
       reason: 'mode_fields_mismatch',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A field the mode requires is missing, or countries is given in mode nearby. The message names the field.',
+      when: 'A field the mode requires is missing, or countries is given or offset above 0 in mode nearby. The message names the field.',
       recovery:
-        'Supply the fields the chosen mode needs (code: postalCode; place_name: placeName; nearby: lat and lng, without countries) and call geonames_find_postal_codes again.',
+        'Supply the fields the chosen mode needs (code: postalCode; place_name: placeName; nearby: lat and lng, without countries or offset) and call geonames_find_postal_codes again.',
       severity: 'notice',
     },
     {
       reason: 'unknown_country_code',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A countries entry is a well-formed alpha-3 or three-digit numeric code that no country has.',
+      when: 'A countries entry, once mapped to alpha-2, is none of the 250 country codes or the retired AN, CS, and YU: an alpha-2 such as EL or EU, or an unassigned alpha-3 or numeric code.',
       recovery:
         'Find the country with geonames_get_countries (nameContains matches its name), then call again with its alpha-2, alpha-3, or numeric code.',
       severity: 'notice',
@@ -234,8 +255,9 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ truncated: false, shown: 0, cap: input.limit });
-    const { mode, postalCode, placeName, lat, lng, countries } = input;
+    const { mode, postalCode, placeName, lat, lng, countries, offset } = input;
+    const { applied: limit, fragment: clampFragment } = clampLimit(input.limit, MAX_LIMIT);
+    ctx.enrich({ truncated: false, shown: 0, cap: limit });
     if (mode === 'code' && postalCode === undefined) {
       throw ctx.fail('mode_fields_mismatch', 'mode code needs postalCode.');
     }
@@ -254,6 +276,12 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
           'mode nearby does not take countries: the coordinate already places the search.',
         );
       }
+      if (offset > 0) {
+        throw ctx.fail(
+          'mode_fields_mismatch',
+          'mode nearby takes no offset: it always returns the nearest postal codes first. Call again without offset.',
+        );
+      }
       point = { lat, lng };
     }
     const unknownCountries = unknownCountryCodes(countries);
@@ -264,33 +292,60 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
 
     const service = getGeoNamesService();
     const account = service.resolveAccount(input.geonamesUsername);
-    const postalCodes = point
+    /** One row past the page: GeoNames sends no total, so the extra row is what says more remain. */
+    const rows = point
       ? await service.postalNearby(
-          { ...point, radiusKm: input.radiusKm, limit: input.limit },
+          { ...point, radiusKm: input.radiusKm, limit: limit + 1 },
           account,
           ctx,
         )
       : await service.postalSearch(
-          { limit: input.limit, postalCode, placeName, countries },
+          { limit: limit + 1, offset, postalCode, placeName, countries },
           account,
           ctx,
         );
+    const postalCodes = rows.slice(0, limit);
+    const more = rows.length > limit;
+    const next = offset + limit;
+    /** Past the cap, offset 5000 is still a page: it repeats this page's tail, then reaches row `next`. */
+    const nextOffset =
+      more && !point && offset < MAX_OFFSET ? Math.min(next, MAX_OFFSET) : undefined;
 
     const shown = postalCodes.length;
     ctx.enrich({ shown });
-    if (shown > 0 && shown === input.limit) {
-      const atMax = input.limit === MAX_LIMIT;
-      ctx.enrich.truncated({
-        shown,
-        cap: input.limit,
-        guidance:
-          mode === 'nearby'
-            ? `GeoNames reports no total, and this page is full: more postal codes may lie within ${input.radiusKm} km. ${atMax ? `${MAX_LIMIT} is the most one call returns; query again from other points in the area to reach them.` : `Raise limit (max ${MAX_LIMIT}) to see them.`}`
-            : `GeoNames reports no total, and this page is full: more postal codes may match. ${atMax ? 'Narrow' : `Raise limit (max ${MAX_LIMIT}), or narrow`} with countries or a more specific postalCode or placeName.`,
-      });
+    /** The notice's fragments: clamp, more-rows, outside countries; or the past-end or zero-hit ones alone. */
+    const fragments: string[] = [];
+    if (more) {
+      ctx.enrich.truncated({ shown, cap: limit });
+      if (clampFragment !== undefined) fragments.push(clampFragment);
+      if (point) {
+        fragments.push(
+          `More postal codes lie within ${input.radiusKm} km; ${limit < MAX_LIMIT ? `raise limit (max ${MAX_LIMIT}) to see them.` : `${clampFragment === undefined ? `${MAX_LIMIT} is the most one call returns, so ` : ''}query again from other points in the area to reach them.`}`,
+        );
+      } else if (nextOffset === undefined) {
+        fragments.push(
+          "More postal codes match, but GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries or a more specific postalCode or placeName to reach the rest.",
+        );
+      } else if (nextOffset < next) {
+        const repeated = next - MAX_OFFSET;
+        fragments.push(
+          `More postal codes match; call again with offset ${MAX_OFFSET}, the last offset GeoNames' free service accepts (its first ${repeated} ${repeated === 1 ? 'row repeats' : 'rows repeat'} this page).`,
+        );
+      } else {
+        fragments.push(`More postal codes match; call again with offset ${next}.`);
+      }
     }
-    if (shown === 0) {
-      const fragments: string[] = [];
+    const unlisted = unlistedCountriesFragment(
+      postalCodes.map(({ countryCode }) => countryCode),
+      countries,
+      'postal code',
+    );
+    if (unlisted !== undefined) fragments.push(unlisted);
+    if (shown === 0 && offset > 0) {
+      fragments.push(
+        `No postal code at offset ${offset}; GeoNames reports no total, so the matches end before this offset or there are none. Call again with a smaller offset.`,
+      );
+    } else if (shown === 0) {
       if (mode === 'nearby') {
         fragments.push(
           input.radiusKm < MAX_RADIUS_KM
@@ -318,20 +373,20 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
           fragments.push(
             mode === 'code'
               ? 'No postal code matched; check the spelling, or try mode place_name with the town name.'
-              : `No postal code matched "${inlineText(placeName ?? '')}"; check the spelling of placeName.`,
+              : `No postal code matched "${placeName ?? ''}"; check the spelling of placeName.`,
           );
         }
       }
-      ctx.enrich.notice(fragments.join(' '));
     }
+    if (fragments.length > 0) ctx.enrich.notice(fragments.join(' '));
 
-    return { mode, postalCodes };
+    return { mode, postalCodes, ...(nextOffset === undefined ? {} : { nextOffset }) };
   },
 
   format: (result) => {
     const lines = [`## GeoNames postal codes (mode ${result.mode})`, ''];
     if (result.postalCodes.length === 0) {
-      lines.push('No postal codes matched.');
+      lines.push('No postal codes on this page.');
       return [{ type: 'text', text: lines.join('\n') }];
     }
     const withDistance = result.postalCodes.some((row) => row.distanceInKm !== undefined);
@@ -360,6 +415,7 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
         "The first US row's coordinates are the query point itself (GeoNames resolves it from ZIP-code areas); the other rows are centroids.",
       );
     }
+    if (result.nextOffset !== undefined) lines.push('', `Next page: offset ${result.nextOffset}.`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

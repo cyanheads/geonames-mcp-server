@@ -288,6 +288,61 @@ export const GET_SPARSE_BODY = {
   alternateNames: [],
 };
 
+/**
+ * `getJSON` for Monte Carlo: Monaco's one first-level division (3319178) carries the real
+ * code `00`, which GeoNames sends with that division's id and a blank name.
+ */
+export const GET_MONTE_CARLO_BODY = {
+  geonameId: 2992741,
+  name: 'Monte Carlo',
+  toponymName: 'Monte-Carlo',
+  asciiName: 'Monte-Carlo',
+  lat: '43.73976',
+  lng: '7.42732',
+  fcl: 'P',
+  fclName: 'city, village,...',
+  fcode: 'PPLX',
+  fcodeName: 'section of populated place',
+  countryCode: 'MC',
+  countryName: 'Monaco',
+  countryId: '2993457',
+  continentCode: 'EU',
+  adminCode1: '00',
+  adminName1: '',
+  adminName2: '',
+  adminName3: '',
+  adminName4: '',
+  adminName5: '',
+  adminId1: '3319178',
+  population: 16012,
+  timezone: { timeZoneId: 'Europe/Monaco', gmtOffset: 1, dstOffset: 2 },
+  srtm3: 45,
+  astergdem: 51,
+  alternateNames: [],
+};
+
+/** `getJSON` for a country, where `adminCode1: "00"` arrives with no admin id: a placeholder. */
+export const GET_UNITED_STATES_BODY = {
+  geonameId: 6252001,
+  name: 'United States',
+  toponymName: 'United States',
+  lat: '39.76',
+  lng: '-98.5',
+  fcl: 'A',
+  fcode: 'PCLI',
+  countryCode: 'US',
+  countryName: 'United States',
+  countryId: '6252001',
+  adminCode1: '00',
+  adminName1: '',
+  adminName2: '',
+  adminName3: '',
+  adminName4: '',
+  adminName5: '',
+  population: 327167434,
+  alternateNames: [],
+};
+
 /** `countrySubdivisionJSON` for Paris, level 5. */
 export const SUBDIVISION_PARIS_BODY = {
   countryCode: 'FR',
@@ -436,6 +491,66 @@ export const POSTAL_NEARBY_BODY = {
   ],
 };
 
+/**
+ * `postalCodeSearchJSON?placename=London&country=GB&maxRows=4` (probed 2026-10-18): the
+ * country filter also returns the Isle of Man, its row first and under its own `countryCode`.
+ */
+export const POSTAL_LONDON_GB_BODY = {
+  postalCodes: [
+    {
+      adminCode2: 'IOM',
+      adminName2: 'Isle of Man',
+      lng: -4.5858,
+      countryCode: 'IM',
+      postalCode: 'IM6',
+      placeName: 'Little London',
+      lat: 54.2801,
+    },
+    {
+      adminCode2: 'GLA',
+      adminCode3: 'E09000001',
+      adminName3: 'City of London',
+      adminCode1: 'ENG',
+      adminName2: 'Greater London',
+      lng: -0.1124,
+      countryCode: 'GB',
+      postalCode: 'EC4Y 9BE',
+      adminName1: 'England',
+      'ISO3166-2': 'ENG',
+      placeName: 'London',
+      lat: 51.5127,
+    },
+    {
+      adminCode2: 'GLA',
+      adminCode3: 'E09000025',
+      adminName3: 'Newham',
+      adminCode1: 'ENG',
+      adminName2: 'Greater London',
+      lng: 0.0618,
+      countryCode: 'GB',
+      postalCode: 'E6 2DW',
+      adminName1: 'England',
+      'ISO3166-2': 'ENG',
+      placeName: 'London',
+      lat: 51.5387,
+    },
+    {
+      adminCode2: 'GLA',
+      adminCode3: 'E09000025',
+      adminName3: 'Newham',
+      adminCode1: 'ENG',
+      adminName2: 'Greater London',
+      lng: 0.0553,
+      countryCode: 'GB',
+      postalCode: 'E6 2DX',
+      adminName1: 'England',
+      'ISO3166-2': 'ENG',
+      placeName: 'London',
+      lat: 51.5382,
+    },
+  ],
+};
+
 /** `findNearbyPlaceNameJSON` / `findNearbyJSON`: search rows plus a string distance. */
 export const NEARBY_BODY = {
   geonames: [
@@ -544,6 +659,88 @@ export const SEARCH_UNDER_CAP_BODY = {
 export const SEARCH_SPARSE_BODY = {
   totalResultsCount: 1,
   geonames: [{ geonameId: 1819729, name: 'Hong Kong', toponymName: 'Hong Kong' }],
+};
+
+/**
+ * `searchJSON?name_equals=Douglas&country=GB` (probed 2026-10-18): the country filter also
+ * returns the Isle of Man, each row under its own `countryCode`, two of the four rows IM.
+ */
+export const SEARCH_DOUGLAS_GB_BODY = {
+  totalResultsCount: 4,
+  geonames: [
+    {
+      geonameId: 3042237,
+      name: 'Douglas',
+      toponymName: 'Douglas',
+      lat: '54.15',
+      lng: '-4.48333',
+      fcl: 'P',
+      fclName: 'city, village,...',
+      fcode: 'PPLC',
+      fcodeName: 'capital of a political entity',
+      countryCode: 'IM',
+      countryName: 'Isle of Man',
+      countryId: '3042225',
+      adminCode1: '9782170',
+      adminName1: 'Douglas',
+      adminCodes1: null,
+      population: 26218,
+    },
+    {
+      geonameId: 9782170,
+      name: 'Douglas',
+      toponymName: 'Douglas',
+      lat: '54.15442',
+      lng: '-4.48452',
+      fcl: 'A',
+      fclName: 'country, state, region,...',
+      fcode: 'ADM1',
+      fcodeName: 'first-order administrative division',
+      countryCode: 'IM',
+      countryName: 'Isle of Man',
+      countryId: '3042225',
+      adminCode1: '9782170',
+      adminName1: 'Douglas',
+      adminCodes1: null,
+      population: 28939,
+    },
+    {
+      geonameId: 2651073,
+      name: 'Douglas',
+      toponymName: 'Douglas',
+      lat: '55.55',
+      lng: '-3.85',
+      fcl: 'P',
+      fclName: 'city, village,...',
+      fcode: 'PPL',
+      fcodeName: 'populated place',
+      countryCode: 'GB',
+      countryName: 'United Kingdom',
+      countryId: '2635167',
+      adminCode1: 'SCT',
+      adminName1: 'Scotland',
+      adminCodes1: { ISO3166_2: 'SCT' },
+      population: 1560,
+    },
+    {
+      geonameId: 2651072,
+      name: 'River Douglas',
+      toponymName: 'River Douglas',
+      lat: '53.73333',
+      lng: '-2.83333',
+      fcl: 'H',
+      fclName: 'stream, lake, ...',
+      fcode: 'STM',
+      fcodeName: 'stream',
+      countryCode: 'GB',
+      countryName: 'United Kingdom',
+      countryId: '2635167',
+      adminCode1: 'ENG',
+      adminName1: 'England',
+      adminCodes1: { ISO3166_2: 'ENG' },
+      population: 0,
+    },
+  ],
 };
 
 /** `hierarchyJSON` for Seattle: Earth, continent, country, state, county, then the city. */
@@ -781,4 +978,165 @@ export const COUNTRY_SPARSE_BODY = {
       west: 3.34,
     },
   ],
+};
+
+/**
+ * `getJSON` for the country record of Monaco, as received (alternate names trimmed): it
+ * sends its one division's code and id (`00`, 3319178) as its own ADM1, and its own
+ * geonameId as `countryId`. The timezone block carries the place's local `time`.
+ */
+export const GET_MONACO_COUNTRY_BODY = {
+  timezone: {
+    gmtOffset: 1,
+    timeZoneId: 'Europe/Monaco',
+    dstOffset: 2,
+    time: '2026-10-18 09:46',
+  },
+  bbox: {
+    east: 7.440037831,
+    south: 43.724488524,
+    north: 43.7519093,
+    west: 7.4090776,
+    accuracyLevel: 0,
+  },
+  asciiName: 'Principality of Monaco',
+  astergdem: 52,
+  countryId: '2993457',
+  fcl: 'A',
+  srtm3: 43,
+  countryCode: 'MC',
+  adminId1: '3319178',
+  lat: '43.73141',
+  fcode: 'PCLI',
+  continentCode: 'EU',
+  adminCode1: '00',
+  lng: '7.41903',
+  geonameId: 2993457,
+  toponymName: 'Principality of Monaco',
+  population: 38682,
+  wikipediaURL: 'en.wikipedia.org/wiki/Monaco',
+  adminName5: '',
+  adminName4: '',
+  adminName3: '',
+  adminName2: '',
+  name: 'Monaco',
+  fclName: 'country, state, region,...',
+  countryName: 'Monaco',
+  fcodeName: 'independent political entity',
+  adminName1: '',
+  alternateNames: [],
+};
+
+/** `timezoneJSON` for Sydney at 05:42 UTC on 2026-10-18, as received: AEDT on 1 January. */
+export const TIMEZONE_SYDNEY_BODY = {
+  sunrise: '2026-10-18 06:10',
+  lng: 151.2093,
+  countryCode: 'AU',
+  gmtOffset: 11,
+  rawOffset: 10,
+  sunset: '2026-10-18 19:10',
+  timezoneId: 'Australia/Sydney',
+  dstOffset: 10,
+  countryName: 'Australia',
+  time: '2026-10-18 16:42',
+  lat: -33.8688,
+};
+
+/**
+ * `timezoneJSON` for Tonga with `date=2026-10-17`, as received at 07:50 UTC on 2026-10-18.
+ * The default pair is the next local day's; the `dates[0]` pair is on `time`'s date.
+ */
+export const TIMEZONE_TONGA_DATED_BODY = {
+  sunrise: '2026-10-19 06:06',
+  lng: -175.2018,
+  countryCode: 'TO',
+  gmtOffset: 13,
+  rawOffset: 13,
+  sunset: '2026-10-19 18:45',
+  timezoneId: 'Pacific/Tongatapu',
+  dstOffset: 13,
+  dates: [
+    { date: '2026-10-17', sunrise: '2026-10-18 06:07', sunset: '2026-10-18 18:44' },
+    { offsetToGmt: '13.00' },
+  ],
+  countryName: 'Tonga',
+  time: '2026-10-18 20:50',
+  lat: -21.1394,
+};
+
+/**
+ * `timezoneJSON` for Los Angeles with `date=2026-10-17`, as received at 05:46 UTC on
+ * 2026-10-18: the default pair is the next local day's, the `dates[0]` pair today's.
+ */
+export const TIMEZONE_LOS_ANGELES_DATED_BODY = {
+  sunrise: '2026-10-18 07:00',
+  lng: -118.2437,
+  countryCode: 'US',
+  gmtOffset: -8,
+  rawOffset: -8,
+  sunset: '2026-10-18 18:14',
+  timezoneId: 'America/Los_Angeles',
+  dstOffset: -7,
+  dates: [
+    { date: '2026-10-17', sunrise: '2026-10-17 06:59', sunset: '2026-10-17 18:16' },
+    { offsetToGmt: '-7.00' },
+  ],
+  countryName: 'United States',
+  time: '2026-10-17 22:46',
+  lat: 34.0522,
+};
+
+/**
+ * `timezoneJSON` for Auckland with `date=2026-10-19`, as received at 05:54 UTC on
+ * 2026-10-18: the default pair is on `time`'s date, the `dates[0]` pair the next day's.
+ */
+export const TIMEZONE_AUCKLAND_DATED_BODY = {
+  sunrise: '2026-10-18 06:33',
+  lng: 174.7633,
+  countryCode: 'NZ',
+  gmtOffset: 13,
+  rawOffset: 12,
+  sunset: '2026-10-18 19:39',
+  timezoneId: 'Pacific/Auckland',
+  dstOffset: 12,
+  dates: [
+    { date: '2026-10-19', sunrise: '2026-10-19 06:31', sunset: '2026-10-19 19:40' },
+    { offsetToGmt: '13.00' },
+  ],
+  countryName: 'New Zealand',
+  time: '2026-10-18 18:54',
+  lat: -36.8485,
+};
+
+/**
+ * `timezoneJSON` for Sydney with `date=2026-10-18` at 23:26 UTC on 2026-10-17: the default
+ * pair (2026-10-17, as observed then) is the previous local day's, the `dates[0]` pair
+ * (as received for that date) today's.
+ */
+export const TIMEZONE_SYDNEY_DATED_BODY = {
+  ...TIMEZONE_SYDNEY_BODY,
+  sunrise: '2026-10-17 06:11',
+  sunset: '2026-10-17 19:09',
+  time: '2026-10-18 10:26',
+  dates: [
+    { date: '2026-10-18', sunrise: '2026-10-18 06:10', sunset: '2026-10-18 19:10' },
+    { offsetToGmt: '11.00' },
+  ],
+};
+
+/**
+ * `timezoneJSON` for Alert, Nunavut, in polar night, as received, plus the event-less
+ * `dates[0]` entry GeoNames sends for a date the sun does not rise.
+ */
+export const TIMEZONE_POLAR_DATED_BODY = {
+  lng: -62.3481,
+  countryCode: 'CA',
+  gmtOffset: -5,
+  rawOffset: -5,
+  timezoneId: 'America/Iqaluit',
+  dstOffset: -4,
+  dates: [{ date: '2026-10-17' }, { offsetToGmt: '-4.00' }],
+  countryName: 'Canada',
+  time: '2026-10-18 01:49',
+  lat: 82.5018,
 };

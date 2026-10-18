@@ -1,8 +1,10 @@
 /**
  * @fileoverview Shared tool inputs: blank-as-unset, comma-list normalization, country codes
- * mapped to alpha-2, id and URL reduction, bounds, the feature-filter intersection check,
- * the strict name matcher, local pagination, and the argument names redacted from the
- * failed-call payload record.
+ * mapped to alpha-2, id and URL reduction, bounds and the limit clamp, the notice fragment
+ * naming a page's countries outside the filter, the feature-filter intersection check,
+ * the strict name matcher, local pagination, the argument names redacted from the
+ * failed-call payload record, and each tool's advertised input schema against every form its
+ * descriptions offer (casing, class prefix, URL, whitespace, joined list, JSON type).
  * @module tests/shared/shared-inputs.test
  */
 
@@ -13,6 +15,8 @@ import { allToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import {
   blankAsUnset,
   citiesInput,
+  clampedLimitInput,
+  clampLimit,
   countriesInput,
   featureClassesInput,
   featureCodesInput,
@@ -20,7 +24,6 @@ import {
   geonameIdInput,
   geonamesUsernameInput,
   latInput,
-  limitInput,
   listInput,
   lngInput,
   nameContainsInput,
@@ -30,6 +33,7 @@ import {
   USERNAME_ALIASES,
   USERNAME_LOG_FIELDS,
   unknownCountryCodes,
+  unlistedCountriesFragment,
 } from '@/mcp-server/tools/shared-inputs.js';
 
 /** `schema.safeParse` on a value, returning the parsed data or the issue paths. */
@@ -183,6 +187,10 @@ describe('USERNAME_LOG_FIELDS', () => {
     'geonamesAccount',
     'GeoNamesAccount',
     'GEONAMES_ACCOUNT',
+    'geonamesuser',
+    'GEONAMESUSER',
+    'geonamesaccount',
+    'GEONAMESACCOUNT',
     'user',
     'USER',
     'account',
@@ -264,12 +272,22 @@ describe('geonameIdInput', () => {
   it('rejects a non-numeric id with one issue', () => {
     expect(parse(geonameIdInput, 'abc').error?.issues).toHaveLength(1);
   });
+
+  it.each(['abc', '0', '012', '-5', '5.5', ''])(
+    'rejects %j with a message that offers the digit string the schema advertises',
+    (input) => {
+      expect(parse(geonameIdInput, input).error?.issues.map(({ message }) => message)).toEqual([
+        'Must be a digit string with no leading zero, such as "5809844".',
+      ]);
+    },
+  );
 });
 
 describe('countriesInput', () => {
   it('upper-cases and accepts a list or a comma string', () => {
     expect(ok(countriesInput, 'us, de')).toEqual(['US', 'DE']);
     expect(ok(countriesInput, ['us'])).toEqual(['US']);
+    expect(ok(countriesInput, ['Us', 'dE', 'Usa', 'gBR'])).toEqual(['US', 'DE', 'US', 'GB']);
   });
 
   it.each([
@@ -281,6 +299,18 @@ describe('countriesInput', () => {
     ],
     ['us,uk', ['US', 'GB']],
   ])('maps UK to GB in %j', (input, expected) => {
+    expect(ok(countriesInput, input)).toEqual(expected);
+  });
+
+  it.each([
+    ['FL', ['LI']],
+    ['fl', ['LI']],
+    [
+      ['fl', 'ch'],
+      ['LI', 'CH'],
+    ],
+    ['LIE, 438, li', ['LI', 'LI', 'LI']],
+  ])('maps FL, the code GeoNames reads as Liechtenstein, to LI in %j', (input, expected) => {
     expect(ok(countriesInput, input)).toEqual(expected);
   });
 
@@ -323,6 +353,13 @@ describe('countriesInput', () => {
     });
   });
 
+  it('says a listed country also returns the territories GeoNames files under it, and never that it keeps only those countries', () => {
+    expect(countriesInput.description).toContain(
+      'A listed country also returns the territories GeoNames files under it (GB also returns IM, JE, and GG), each result naming its own country in countryCode.',
+    );
+    expect(countriesInput.description).not.toMatch(/\bonly\b/i);
+  });
+
   it.each(['', ',', [], undefined])('reads %j as unset', (input) => {
     expect(ok(countriesInput, input)).toBeUndefined();
   });
@@ -332,13 +369,26 @@ describe('unknownCountryCodes', () => {
   const FORMS =
     'countries takes ISO 3166-1 codes: alpha-2 (US, GB, DE), alpha-3 (USA), or three-digit numeric (840).';
 
-  it('names the alpha-3 and numeric entries the table could not map, in input order', () => {
+  it('names every entry outside the bundled alpha-2 codes once normalized, in input order', () => {
     const countries = ok(countriesInput, 'us, zzz, DEU, 999, xx') as string[];
     expect(unknownCountryCodes(countries)).toEqual({
-      countries: ['ZZZ', '999'],
-      message: `No country has the codes ZZZ, 999. ${FORMS}`,
+      countries: ['ZZZ', '999', 'XX'],
+      message: `No country has the codes ZZZ, 999, XX. ${FORMS}`,
     });
   });
+
+  it.each(['EL', 'XX', 'EU', 'FX', 'TP', 'ZR', 'SU'])(
+    'names the alpha-2 code %s, which GeoNames files no feature under, in any case',
+    (code) => {
+      for (const written of [code, code.toLowerCase(), `${code[0]}${code[1]?.toLowerCase()}`]) {
+        const countries = ok(countriesInput, ['US', written]) as string[];
+        expect(unknownCountryCodes(countries)).toEqual({
+          countries: [code],
+          message: `No country has the code ${code}. ${FORMS}`,
+        });
+      }
+    },
+  );
 
   it('uses the singular for one code', () => {
     expect(unknownCountryCodes(['000'])?.message).toBe(`No country has the code 000. ${FORMS}`);
@@ -352,15 +402,90 @@ describe('unknownCountryCodes', () => {
     });
   });
 
-  it('finds nothing in alpha-2 codes, known or not, or an unset filter', () => {
-    expect(unknownCountryCodes(['US', 'XX', 'GB'])).toBeUndefined();
+  it('finds nothing in codes the table has, UK and the alpha-3 and numeric forms included, or an unset filter', () => {
+    expect(unknownCountryCodes(['US', 'XK', 'GB'])).toBeUndefined();
+    expect(
+      unknownCountryCodes(ok(countriesInput, 'uk, UK, gr, GRC, 300') as string[]),
+    ).toBeUndefined();
     expect(unknownCountryCodes(undefined)).toBeUndefined();
+  });
+
+  it.each(['AN', 'CS', 'YU'])(
+    'accepts the retired code %s, which GeoNames still files historical-country records under, in any case',
+    (code) => {
+      for (const written of [code, code.toLowerCase(), `${code[0]}${code[1]?.toLowerCase()}`]) {
+        const countries = ok(countriesInput, ['US', written]) as string[];
+        expect(countries).toEqual(['US', code]);
+        expect(unknownCountryCodes(countries)).toBeUndefined();
+      }
+    },
+  );
+
+  it('maps no alpha-3 or numeric form of a retired code, so those still fail', () => {
+    const countries = ok(countriesInput, 'ANT, CSK, SCG, YUG, 530, 200, 891') as string[];
+    expect(unknownCountryCodes(countries)?.countries).toEqual([
+      'ANT',
+      'CSK',
+      'SCG',
+      'YUG',
+      '530',
+      '200',
+      '891',
+    ]);
+  });
+});
+
+describe('unlistedCountriesFragment', () => {
+  const fragment = (codes: string, entries: string, entry: string) =>
+    `This page also holds ${entries} in ${codes}, which countries does not list: GeoNames returns the territories it files under a listed country, and each ${entry}'s countryCode names its own country.`;
+
+  it.each([
+    ['place', 'places'],
+    ['postal code', 'postal codes'],
+  ] as const)('names one outside code for a %s page', (noun, plural) => {
+    expect(unlistedCountriesFragment(['IM', 'GB'], ['GB'], noun)).toBe(
+      fragment('IM', plural, noun),
+    );
+  });
+
+  it('names each outside code once, in page order, as an English list', () => {
+    expect(unlistedCountriesFragment(['JE', 'GB', 'IM', 'JE'], ['GB'], 'place')).toBe(
+      fragment('JE and IM', 'places', 'place'),
+    );
+    expect(unlistedCountriesFragment(['IM', 'JE', 'GB', 'IM', 'GG'], ['GB'], 'place')).toBe(
+      fragment('IM, JE, and GG', 'places', 'place'),
+    );
+  });
+
+  it('compares against countries as the schema normalized them, so UK, GBR, and 826 list GB', () => {
+    for (const written of ['uk', ['gbr'], ['826'], 'GB']) {
+      const countries = ok(countriesInput, written) as string[];
+      expect(unlistedCountriesFragment(['GB', 'IM'], countries, 'postal code')).toBe(
+        fragment('IM', 'postal codes', 'postal code'),
+      );
+    }
+    const both = ok(countriesInput, 'uk, IMN') as string[];
+    expect(unlistedCountriesFragment(['GB', 'IM'], both, 'postal code')).toBeUndefined();
+  });
+
+  it('returns nothing without countries, for an empty page, or when every code is listed', () => {
+    expect(unlistedCountriesFragment(['IM', 'GB'], undefined, 'place')).toBeUndefined();
+    expect(unlistedCountriesFragment([], ['GB'], 'place')).toBeUndefined();
+    expect(unlistedCountriesFragment(['IM', 'GB'], ['GB', 'IM'], 'place')).toBeUndefined();
+  });
+
+  it('skips a row that carries no countryCode', () => {
+    expect(unlistedCountriesFragment([undefined, 'GB'], ['GB'], 'place')).toBeUndefined();
+    expect(unlistedCountriesFragment([undefined, 'IM'], ['GB'], 'place')).toBe(
+      fragment('IM', 'places', 'place'),
+    );
   });
 });
 
 describe('featureClassesInput', () => {
   it('accepts upper- or lower-case letters', () => {
     expect(ok(featureClassesInput, 'p, a')).toEqual(['P', 'A']);
+    expect(ok(featureClassesInput, ['t', 'H'])).toEqual(['T', 'H']);
   });
 
   it('accepts all nine classes and rejects a tenth item', () => {
@@ -377,6 +502,7 @@ describe('featureClassesInput', () => {
 describe('featureCodesInput', () => {
   it('upper-cases and strips a leading class prefix', () => {
     expect(ok(featureCodesInput, 'P.PPLC, adm1, s.airp')).toEqual(['PPLC', 'ADM1', 'AIRP']);
+    expect(ok(featureCodesInput, ['Pplc', 't.Mt', 'p.PplC'])).toEqual(['PPLC', 'MT', 'PPLC']);
   });
 
   it('keeps digits and bare codes', () => {
@@ -508,27 +634,7 @@ describe('nameContainsInput', () => {
   });
 });
 
-describe('limitInput and offsetInput', () => {
-  const limit = limitInput(100, 20);
-
-  it('defaults an omitted or blank limit', () => {
-    expect(ok(limit, undefined)).toBe(20);
-    expect(ok(limit, '')).toBe(20);
-    expect(ok(limit, '  ')).toBe(20);
-  });
-
-  it.each([1, 50, 100])('accepts limit %s', (value) => {
-    expect(ok(limit, value)).toBe(value);
-  });
-
-  it.each([0, -1, 101, 1.5, '5'])('rejects limit %j', (value) => {
-    rejects(limit, value);
-  });
-
-  it('describes its own bounds', () => {
-    expect(limit.description).toBe('Maximum entries to return, 1 to 100. Default 20.');
-  });
-
+describe('offsetInput', () => {
   it('defaults an omitted or blank offset to 0, and accepts any non-negative integer', () => {
     const offset = offsetInput();
     expect(ok(offset, undefined)).toBe(0);
@@ -543,6 +649,67 @@ describe('limitInput and offsetInput', () => {
     expect(ok(offset, 5_000)).toBe(5_000);
     rejects(offset, 5_001);
     expect(offset.description).toContain('0 to 5000');
+  });
+});
+
+describe('clampedLimitInput and clampLimit', () => {
+  const limit = clampedLimitInput(100, 10);
+
+  it('defaults an omitted or blank limit', () => {
+    expect(ok(limit, undefined)).toBe(10);
+    expect(ok(limit, '')).toBe(10);
+    expect(ok(limit, '  ')).toBe(10);
+  });
+
+  it.each([1, 100, 101, 1000])('accepts limit %s, past the cap up to 1,000', (value) => {
+    expect(ok(limit, value)).toBe(value);
+  });
+
+  it.each([0, -1, 1001, 1.5, 'many', true, { value: 5 }])('rejects limit %j', (value) => {
+    rejects(limit, value);
+  });
+
+  it('advertises 1 to 1000 as an integer, whatever the cap', () => {
+    for (const cap of [50, 100, 700]) {
+      const { properties } = z.toJSONSchema(z.object({ limit: clampedLimitInput(cap, 10) }), {
+        io: 'input',
+        target: 'draft-2020-12',
+      });
+      expect(properties?.limit).toMatchObject({ type: 'integer', minimum: 1, maximum: 1000 });
+    }
+  });
+
+  it('names the 1,000 ceiling, the cap, the clamp, and the default', () => {
+    expect(limit.description).toBe(
+      'Maximum entries to return, 1 to 1,000. This tool returns at most 100 per call: a larger limit is held to 100, and the notice says so when more entries remain. Default 10.',
+    );
+  });
+
+  it.each([
+    [1, 100],
+    [99, 100],
+    [100, 100],
+    [50, 50],
+  ])('applies %i under cap %i as given, with no fragment', (requested, cap) => {
+    expect(clampLimit(requested, cap)).toEqual({ applied: requested });
+  });
+
+  it.each([
+    [101, 100],
+    [1000, 100],
+    [701, 700],
+  ])('holds %i to cap %i and names both', (requested, cap) => {
+    expect(clampLimit(requested, cap)).toEqual({
+      applied: cap,
+      fragment: `limit ${requested} was capped at ${cap}, the most this tool returns per call.`,
+    });
+  });
+
+  it('names the input it clamps', () => {
+    expect(clampLimit(80, 50, 'nearbyLimit')).toEqual({
+      applied: 50,
+      fragment: 'nearbyLimit 80 was capped at 50, the most this tool returns per call.',
+    });
   });
 });
 
@@ -619,5 +786,225 @@ describe('paginate', () => {
       offset = nextOffset;
     }
     expect(seen).toEqual(items);
+  });
+});
+
+describe('advertised input schemas', () => {
+  /** A `tools/list` input property: its JSON type, description, and the check it or its items carry. */
+  interface Advertised {
+    description?: string;
+    enum?: unknown[];
+    items?: { enum?: unknown[]; pattern?: string };
+    pattern?: string;
+    properties?: Record<string, Advertised>;
+    type?: string;
+  }
+
+  /** Wording that offers other casings of a value, unqualified "letters" included. */
+  const CASE_CLAIM =
+    /case[- ]?insensitive|any[- ]case|either case|ignoring case|regardless of case|\bcase\b[^.]*\b(?:normali[sz]ed|ignored)\b|(?<!capital |upper-case |lower-case )\bletters\b/i;
+
+  /** A feature code written with its class prefix, such as P.PPLC. */
+  const CLASS_PREFIXED = /\b[A-Za-z]\.[A-Za-z0-9]{2,5}\b/g;
+
+  /** A host-and-path URL form, such as geonames.org/<id>. */
+  const URL_FORM = /\b(?:https?:\/\/)?(?:[\w-]+\.)+[a-z]{2,}\/[^\s,;)]*/gi;
+
+  /** Wording that offers surrounding or repeated whitespace. */
+  const WHITESPACE_CLAIM =
+    /\b(?:extra|surrounding|leading|trailing|repeated) (?:spaces|whitespace)\b|\b(?:spaces|whitespace) (?:is|are) (?:normali[sz]ed|trimmed|collapsed|ignored)\b/i;
+
+  /** Wording that offers a list as one delimited string. */
+  const JOINED_LIST = /comma[- ](?:separated|joined|delimited)|separated by commas/i;
+
+  /** Wording that offers the value as a JSON type, with the emitted types that admit it. */
+  const TYPE_WORDS: readonly (readonly [RegExp, readonly string[]])[] = [
+    [/\ban? (?:positive |non-negative |whole )?(?:integer|number)\b/i, ['integer', 'number']],
+    [/\ban? (?:[\w-]+ )?string\b/i, ['string']],
+    [/\ba list\b/i, ['array']],
+    [/\b(?:a boolean|true or false)\b/i, ['boolean']],
+  ];
+
+  /** The `geonameId` pattern: a digit string with no leading zero. */
+  const GEONAME_ID_PATTERN = '^[1-9]\\d*$';
+
+  /** The value in lower, upper, and both mixed cases, other than as written. */
+  const casings = (value: string): string[] =>
+    [
+      value.toLowerCase(),
+      value.toUpperCase(),
+      `${value.charAt(0).toUpperCase()}${value.slice(1).toLowerCase()}`,
+      `${value.charAt(0).toLowerCase()}${value.slice(1).toUpperCase()}`,
+    ].filter((variant, index, all) => variant !== value && all.indexOf(variant) === index);
+
+  /**
+   * One advertised property. `samples` are the values its check admits (enum members, or the
+   * description's own words and codes that its pattern admits); `refused` pairs each sample
+   * with every casing of it the check refuses. A property with no pattern or enum admits
+   * any string. `field` is the tool's own schema for a top-level property.
+   */
+  const toProperty = (path: string, property: Advertised, field?: z.ZodType) => {
+    const check = property.enum || property.pattern ? property : property.items;
+    const admits = (value: string): boolean =>
+      check?.enum
+        ? check.enum.includes(value)
+        : check?.pattern
+          ? new RegExp(check.pattern, 'u').test(value)
+          : true;
+    const description = property.description ?? '';
+    const samples = [
+      ...new Set(
+        check?.enum
+          ? check.enum.filter((member): member is string => typeof member === 'string')
+          : check?.pattern
+            ? (description.match(/[\p{L}\p{N}][\p{L}\p{N}-]*/gu) ?? []).filter(admits)
+            : [],
+      ),
+    ];
+    const refused = samples
+      .filter((sample) => /\p{L}/u.test(sample))
+      .flatMap((sample) =>
+        casings(sample)
+          .filter((variant) => !admits(variant))
+          .map((variant): [string, string] => [sample, variant]),
+      );
+    return { path, property, field, description, admits, samples, refused };
+  };
+
+  type Property = ReturnType<typeof toProperty>;
+
+  /** Every input property, nested ones included, read from the JSON Schema `tools/list` advertises. */
+  const PROPERTIES: Property[] = allToolDefinitions.flatMap((tool) =>
+    Object.entries(
+      (z.toJSONSchema(tool.input, { io: 'input', target: 'draft-2020-12' }).properties ??
+        {}) as Record<string, Advertised>,
+    ).flatMap(([key, property]) => [
+      toProperty(
+        `${tool.name}.${key}`,
+        property,
+        (tool.input.shape as Record<string, z.ZodType>)[key],
+      ),
+      ...Object.entries(property.properties ?? {}).map(([inner, nested]) =>
+        toProperty(`${tool.name}.${key}.${inner}`, nested),
+      ),
+    ]),
+  );
+
+  /** Each form the description offers that the advertised schema refuses. */
+  const offeredButRefused = ({
+    property,
+    description,
+    admits,
+    samples,
+    refused,
+  }: Property): string[] => [
+    ...(CASE_CLAIM.test(description) ? refused.map(([, variant]) => variant) : []),
+    ...(description.match(CLASS_PREFIXED) ?? []).filter((spelling) => !admits(spelling)),
+    ...(description.match(URL_FORM) ?? [])
+      .map((url) => url.replace(/<[^>]*>/g, '1'))
+      .filter((url) => !admits(url)),
+    ...(WHITESPACE_CLAIM.test(description)
+      ? samples
+          .flatMap((sample) => [` ${sample}`, `${sample} `])
+          .filter((spaced) => !admits(spaced))
+      : []),
+    ...(property.type === 'array' && JOINED_LIST.test(description)
+      ? [`a ${JOINED_LIST.exec(description)?.[0]} string for an array`]
+      : []),
+    ...TYPE_WORDS.filter(
+      ([wording, types]) => wording.test(description) && !types.includes(property.type ?? ''),
+    ).map(([wording]) => `"${wording.exec(description)?.[0]}" for type ${property.type}`),
+  ];
+
+  it.each(PROPERTIES)('$path offers no form its advertised schema refuses', (property) => {
+    expect(offeredButRefused(property)).toEqual([]);
+  });
+
+  it('finds a refused casing on every property whose schema normalizes case', () => {
+    expect(PROPERTIES.filter(({ refused }) => refused.length > 0).map(({ path }) => path)).toEqual([
+      'geonames_search_places.match',
+      'geonames_search_places.countries',
+      'geonames_search_places.featureClasses',
+      'geonames_search_places.featureCodes',
+      'geonames_search_places.cities',
+      'geonames_search_places.orderBy',
+      'geonames_get_place.nameLanguages',
+      'geonames_get_children.hierarchy',
+      'geonames_reverse_geocode.cities',
+      'geonames_reverse_geocode.featureClasses',
+      'geonames_reverse_geocode.featureCodes',
+      'geonames_find_postal_codes.mode',
+      'geonames_find_postal_codes.postalCode',
+      'geonames_find_postal_codes.countries',
+      'geonames_get_countries.countries',
+      'geonames_get_countries.continent',
+      'geonames_list_reference.topic',
+      'geonames_list_reference.featureClass',
+    ]);
+  });
+
+  it('advertises every list as an array and every geonameId as a digit-string pattern', () => {
+    expect(
+      PROPERTIES.filter(({ property }) => property.type === 'array').map(({ path }) => path),
+    ).toEqual([
+      'geonames_search_places.countries',
+      'geonames_search_places.featureClasses',
+      'geonames_search_places.featureCodes',
+      'geonames_get_place.nameLanguages',
+      'geonames_reverse_geocode.featureClasses',
+      'geonames_reverse_geocode.featureCodes',
+      'geonames_find_postal_codes.countries',
+      'geonames_get_countries.countries',
+    ]);
+    expect(
+      PROPERTIES.filter(({ property }) => property.pattern === GEONAME_ID_PATTERN).map(
+        ({ path }) => path,
+      ),
+    ).toEqual([
+      'geonames_get_place.geonameId',
+      'geonames_get_hierarchy.geonameId',
+      'geonames_get_children.geonameId',
+    ]);
+  });
+
+  it.each(PROPERTIES.filter(({ refused }) => refused.length > 0))(
+    '$path still accepts each casing its advertised check refuses, as the value it cases',
+    ({ field, property, refused }) => {
+      const sent = (value: string) => (property.type === 'array' ? [value] : value);
+      for (const [sample, variant] of refused) {
+        expect(ok(field as z.ZodType, sent(variant)), variant).toEqual(
+          ok(field as z.ZodType, sent(sample)),
+        );
+      }
+    },
+  );
+
+  it.each(PROPERTIES.filter(({ property }) => property.type === 'array'))(
+    '$path still splits a comma-joined string into the list it names',
+    ({ field, samples }) => {
+      const pair = samples.slice(0, 2);
+      expect(pair).toHaveLength(2);
+      expect(ok(field as z.ZodType, ` ${pair.join(' ,')} `)).toEqual(ok(field as z.ZodType, pair));
+    },
+  );
+
+  it.each(PROPERTIES.filter(({ property }) => property.pattern === GEONAME_ID_PATTERN))(
+    '$path still reduces a geonames.org URL, a JSON integer, and padding to the digit string',
+    ({ field }) => {
+      for (const sent of [
+        'https://www.geonames.org/5809844/seattle.html',
+        'sws.geonames.org/5809844/',
+        5809844,
+        ' 5809844 ',
+      ]) {
+        expect(ok(field as z.ZodType, sent), String(sent)).toBe('5809844');
+      }
+    },
+  );
+
+  it('still collapses and trims the whitespace of a postal code, upper-casing it', () => {
+    const postal = PROPERTIES.find(({ path }) => path === 'geonames_find_postal_codes.postalCode');
+    expect(ok(postal?.field as z.ZodType, ' sw1a   1aa ')).toBe('SW1A 1AA');
+    expect(ok(postal?.field as z.ZodType, 'k1a\t0b1')).toBe('K1A 0B1');
   });
 });

@@ -519,7 +519,7 @@ describe('no account name anywhere', () => {
           endpoint: 'searchJSON',
           httpStatus: 200,
           bodyBytes: expect.any(Number),
-          account: 'caller',
+          payer: 'caller',
         },
       ]);
       expect(JSON.stringify(records)).not.toContain(CALLER_USERNAME);
@@ -533,7 +533,7 @@ describe('no account name anywhere', () => {
       await service.search(SEARCH, service.resolveAccount(undefined), makeContext());
       expect(responseRecords(debug)[0]).toMatchObject({
         bodyBytes: new TextEncoder().encode(body).byteLength,
-        account: 'server',
+        payer: 'server',
       });
     });
 

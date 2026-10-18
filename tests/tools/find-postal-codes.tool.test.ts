@@ -1,6 +1,8 @@
 /**
  * @fileoverview geonames_find_postal_codes: input normalization and blank-as-unset, the
- * request each mode sends, row mapping, the full-page and zero-hit notices, mode_fields_mismatch
+ * request each mode sends, row mapping, the one-row lookahead, offset paging and its notices,
+ * the zero-hit and past-end notices, a limit held to the 100 cap, rows outside the listed
+ * countries, every notice raw in structuredContent and escaped in content[], mode_fields_mismatch
  * and the shared error contracts on the wire, the required enrichment on the zero-result and
  * under-cap pages, upstream failure classes, and format() parity with structuredContent.
  * @module tests/tools/find-postal-codes.tool.test
@@ -24,6 +26,7 @@ import {
   CALLER_USERNAME,
   jsonResponse,
   POSTAL_COUNTRIES_BODY,
+  POSTAL_LONDON_GB_BODY,
   POSTAL_NEARBY_BODY,
   POSTAL_SEARCH_BODY,
   quotaMessage,
@@ -69,6 +72,7 @@ interface PostalRow {
 interface Page {
   cap: number;
   mode: string;
+  nextOffset?: number;
   notice?: string;
   postalCodes: PostalRow[];
   shown: number;
@@ -115,6 +119,45 @@ const endpoints = (fetchFake: ReturnType<typeof serve>) =>
 
 const EMPTY = { postalCodes: [] };
 
+/**
+ * Answers with `total` postal rows (codes 98101 upward) the way GeoNames pages them: from
+ * `startRow` (0 when unsent, as on the nearby endpoint), at most `maxRows`. `countryOf`
+ * files a row under another country by its index across all `total` rows (US otherwise).
+ */
+const pagedRows =
+  (total: number, countryOf?: (index: number) => string): Responder =>
+  (url) => {
+    const start = Number(url.searchParams.get('startRow') ?? 0);
+    const count = Number(url.searchParams.get('maxRows'));
+    const rows = postalRowsBody(total).postalCodes.map((row, index) =>
+      countryOf === undefined ? row : { ...row, countryCode: countryOf(index) },
+    );
+    return jsonResponse({ postalCodes: rows.slice(start, start + count) });
+  };
+
+/** Serves `total` rows on both postal lookup endpoints; returns the fetch fake. */
+const servePaged = (total: number, countryOf?: (index: number) => string) =>
+  installService({
+    postalCodeSearchJSON: pagedRows(total, countryOf),
+    findNearbyPostalCodesJSON: pagedRows(total, countryOf),
+    postalCodeCountryInfoJSON: coverageRoute(),
+  });
+
+/** The postal codes of `count` consecutive fixture rows starting at row `first`. */
+const codesFrom = (first: number, count: number) =>
+  Array.from({ length: count }, (_, index) => String(98101 + first + index));
+
+/** The notice fragment for a limit held to the 100 cap. */
+const CLAMP = (requested: number) =>
+  `limit ${requested} was capped at 100, the most this tool returns per call.`;
+
+/** The notice fragment naming the page's countries that `countries` does not list. */
+const OUTSIDE = (codes: string) =>
+  `This page also holds postal codes in ${codes}, which countries does not list: GeoNames returns the territories it files under a listed country, and each postal code's countryCode names its own country.`;
+
+/** The trailer's block-quote lines: the notice, as content[] carries it. */
+const quotedLines = (text: string) => text.split('\n').filter((line) => line.startsWith('>'));
+
 afterEach(() => {
   getGeoNamesService().dispose();
   vi.useRealTimers();
@@ -145,8 +188,29 @@ describe('input normalization', () => {
     expect(endpoints(fetchFake)).toEqual([endpoint]);
   });
 
-  it('says mode is case-insensitive', () => {
-    expect(findPostalCodesTool.input.shape.mode.description).toContain('Case-insensitive.');
+  it('names each mode as the advertised enum spells it, offering no other casing', () => {
+    const { description } = findPostalCodesTool.input.shape.mode;
+    expectInOrder(description, ['code:', 'place_name:', 'nearby:']);
+    expect(description).not.toMatch(/case-insensitive/i);
+  });
+
+  it('advertises offset 0 to 5000 for modes code and place_name, in the field and the tool description', () => {
+    const { offset } =
+      z.toJSONSchema(findPostalCodesTool.input, { io: 'input', target: 'draft-2020-12' })
+        .properties ?? {};
+    expect(offset).toMatchObject({ type: 'integer', minimum: 0, maximum: 5000, default: 0 });
+    expectInOrder((offset as { description?: string }).description, [
+      '0 to 5000',
+      'Modes code and place_name only',
+      'nextOffset',
+    ]);
+    expectInOrder(findPostalCodesTool.description, ['page', 'offset', 'up to 5000']);
+  });
+
+  it('states the credit cost, including the coverage-list read a zero-hit lookup with countries adds', () => {
+    expect(findPostalCodesTool.description).toContain(
+      'Costs 1 GeoNames credit (2 for nearby); a code or place_name lookup with countries that returns nothing at offset 0 also reads the postal coverage list, 1 more credit unless that list is cached. Repeat lookups are cached.',
+    );
   });
 
   it.each([
@@ -223,7 +287,7 @@ describe('input normalization', () => {
       ['lat', '0'],
       ['lng', '0'],
       ['radius', '10'],
-      ['maxRows', '10'],
+      ['maxRows', '11'],
     ]);
   });
 
@@ -257,16 +321,56 @@ describe('input normalization', () => {
     expect(sent(fetchFake)).toContainEqual(['radius', String(radiusKm)]);
   });
 
-  it.each([0, -1, 101, 1.5, 'many', null])('rejects limit %j', async (limit) => {
-    const error = errorOf(await run({ mode: 'code', postalCode: '98101', limit }));
-    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+  it.each([0, -1, 1001, 1.5, 'many', true])(
+    'rejects limit %j before any request',
+    async (limit) => {
+      const fetchFake = serve();
+      const error = errorOf(await run({ mode: 'code', postalCode: '98101', limit }));
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['limit'] })]);
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('advertises limit 1 to 1,000, naming the 100 cap and the clamp', () => {
+    const { limit } =
+      z.toJSONSchema(findPostalCodesTool.input, { io: 'input', target: 'draft-2020-12' })
+        .properties ?? {};
+    expect(limit).toMatchObject({ type: 'integer', minimum: 1, maximum: 1000, default: 10 });
+    expect((limit as { description?: string }).description).toBe(
+      'Maximum entries to return, 1 to 1,000. This tool returns at most 100 per call: a larger limit is held to 100, and the notice says so when more entries remain. Default 10.',
+    );
   });
 
-  it.each(['', '  '])('reads a blank limit (%j) as the default 10', async (blank) => {
+  it.each(['', '  ', null])('reads a blank or null limit (%j) as the default 10', async (blank) => {
     const fetchFake = serve();
     const result = page(await run({ mode: 'code', postalCode: '98101', limit: blank }));
     expect(result.cap).toBe(10);
-    expect(sent(fetchFake)).toContainEqual(['maxRows', '10']);
+    expect(sent(fetchFake)).toContainEqual(['maxRows', '11']);
+  });
+
+  it.each([5001, -1, 2.5, 'next', true])('rejects offset %j before any request', async (offset) => {
+    const fetchFake = serve();
+    const error = errorOf(await run({ mode: 'code', postalCode: '98101', offset }));
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['offset'] })]);
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '  ', null])('reads a blank or null offset (%j) as 0', async (blank) => {
+    const fetchFake = serve();
+    await run({ mode: 'place_name', placeName: 'Seattle', offset: blank });
+    expect(sent(fetchFake)).toContainEqual(['startRow', '0']);
+  });
+
+  it('accepts offset 0 and 5000', async () => {
+    const fetchFake = serve();
+    await run({ mode: 'code', postalCode: '98101', offset: 0 });
+    await run({ mode: 'code', postalCode: '98101', offset: 5000 });
+    expect(requestedUrls(fetchFake).map((url) => url.searchParams.get('startRow'))).toEqual([
+      '0',
+      '5000',
+    ]);
   });
 
   it('accepts limit 1 and 100', async () => {
@@ -283,6 +387,8 @@ describe('input normalization', () => {
       ['GB', 'CA'],
     ],
     ['UK', ['GB']],
+    [['FL'], ['LI']],
+    ['fl', ['LI']],
   ])('normalizes countries %j', async (countries, expected) => {
     const fetchFake = serve();
     await run({ mode: 'code', postalCode: '98101', countries });
@@ -337,24 +443,36 @@ describe('input normalization', () => {
 });
 
 describe('the upstream request', () => {
-  it('mode code sends postalcode, maxRows, and the account, on postalCodeSearchJSON', async () => {
+  it('mode code sends postalcode, one row past limit as maxRows, startRow, and the account, on postalCodeSearchJSON', async () => {
     const fetchFake = serve();
     await run({ mode: 'code', postalCode: '98101' });
     expect(endpoints(fetchFake)).toEqual(['postalCodeSearchJSON']);
     expect(sent(fetchFake)).toEqual([
       ['postalcode', '98101'],
-      ['maxRows', '10'],
+      ['maxRows', '11'],
+      ['startRow', '0'],
     ]);
     expect(requestedUrls(fetchFake)[0]?.searchParams.get('username')).toBe(SERVER_USERNAME);
   });
 
-  it('mode place_name sends placename and maxRows', async () => {
+  it('mode place_name sends placename, maxRows, and offset as startRow', async () => {
     const fetchFake = serve();
-    await run({ mode: 'place_name', placeName: 'Seattle', limit: 3 });
+    await run({ mode: 'place_name', placeName: 'Seattle', limit: 3, offset: 40 });
     expect(endpoints(fetchFake)).toEqual(['postalCodeSearchJSON']);
     expect(sent(fetchFake)).toEqual([
       ['placename', 'Seattle'],
-      ['maxRows', '3'],
+      ['maxRows', '4'],
+      ['startRow', '40'],
+    ]);
+  });
+
+  it.each([1, 100])('asks for limit + 1 rows at limit %i', async (limit) => {
+    const fetchFake = serve();
+    await run({ mode: 'code', postalCode: '98101', limit });
+    await run({ mode: 'nearby', lat: 47.6, lng: -122.33, limit });
+    expect(requestedUrls(fetchFake).map((url) => url.searchParams.get('maxRows'))).toEqual([
+      String(limit + 1),
+      String(limit + 1),
     ]);
   });
 
@@ -368,7 +486,8 @@ describe('the upstream request', () => {
       ['postalcode', '98101'],
       ['placename', 'Seattle'],
       ['country', 'US'],
-      ['maxRows', '10'],
+      ['maxRows', '11'],
+      ['startRow', '0'],
     ]);
   });
 
@@ -388,14 +507,20 @@ describe('the upstream request', () => {
       ['lat', '47.6205'],
       ['lng', '-122.3493'],
       ['radius', '5'],
-      ['maxRows', '4'],
+      ['maxRows', '5'],
     ]);
+  });
+
+  it('mode nearby sends no startRow at offset 0', async () => {
+    const fetchFake = serve();
+    await run({ mode: 'nearby', lat: 47.6, lng: -122.3, offset: 0 });
+    expect(sent(fetchFake).map(([name]) => name)).toEqual(['lat', 'lng', 'radius', 'maxRows']);
   });
 
   it('modes code and place_name never send coordinates or a radius', async () => {
     const fetchFake = serve();
     await run({ mode: 'code', postalCode: '98101', lat: 47.6, lng: -122.3, radiusKm: 5 });
-    expect(sent(fetchFake).map(([name]) => name)).toEqual(['postalcode', 'maxRows']);
+    expect(sent(fetchFake).map(([name]) => name)).toEqual(['postalcode', 'maxRows', 'startRow']);
   });
 
   it.each([
@@ -425,6 +550,17 @@ describe('the upstream request', () => {
     await run({ mode: 'code', postalCode: '98104' });
     await run({ mode: 'code', postalCode: '98101', limit: 5 });
     expect(fetchFake).toHaveBeenCalledTimes(3);
+  });
+
+  it('caches each offset as its own page', async () => {
+    const fetchFake = serve();
+    await run({ mode: 'place_name', placeName: 'London', offset: 10 });
+    await run({ mode: 'place_name', placeName: 'London', offset: 10 });
+    await run({ mode: 'place_name', placeName: 'London' });
+    expect(requestedUrls(fetchFake).map((url) => url.searchParams.get('startRow'))).toEqual([
+      '10',
+      '0',
+    ]);
   });
 });
 
@@ -492,55 +628,87 @@ describe('rows', () => {
 });
 
 describe('notices', () => {
-  describe('a full page', () => {
-    it('warns that more may match in mode code and place_name, with the contract wording', async () => {
-      serve({ search: postalRowsBody(3) });
+  describe('a page that reaches the limit', () => {
+    const MODES_FIELDS = [
+      ['code', { mode: 'code', postalCode: '98101' }],
+      ['place_name', { mode: 'place_name', placeName: 'Seattle' }],
+      ['nearby', { mode: 'nearby', lat: 47.6, lng: -122.33 }],
+    ] as const;
+
+    it.each(MODES_FIELDS)(
+      'mode %s: exactly limit rows with no further upstream row is complete, with no notice',
+      async (_mode, fields) => {
+        const fetchFake = servePaged(3);
+        const result = page(await run({ ...fields, limit: 3 }));
+        expect(result).toMatchObject({ truncated: false, shown: 3, cap: 3 });
+        expect(result.postalCodes.map((row) => row.postalCode)).toEqual(codesFrom(0, 3));
+        expect(result).not.toHaveProperty('notice');
+        expect(result).not.toHaveProperty('nextOffset');
+        expect(sent(fetchFake)).toContainEqual(['maxRows', '4']);
+      },
+    );
+
+    it.each(MODES_FIELDS)(
+      'mode %s: a further upstream row truncates the page to limit rows and is not shown',
+      async (_mode, fields) => {
+        servePaged(4);
+        const result = page(await run({ ...fields, limit: 3 }));
+        expect(result).toMatchObject({ truncated: true, shown: 3, cap: 3 });
+        expect(result.postalCodes.map((row) => row.postalCode)).toEqual(codesFrom(0, 3));
+        expect(result.notice).toMatch(/^More postal codes (match|lie within 10 km);/);
+      },
+    );
+
+    it('modes code and place_name: the notice states that more match and names the next offset', async () => {
+      servePaged(4);
       for (const input of [
         { mode: 'code', postalCode: '98101', limit: 3 },
         { mode: 'place_name', placeName: 'Seattle', limit: 3 },
       ]) {
         const result = page(await run(input));
-        expect(result).toMatchObject({ truncated: true, shown: 3, cap: 3 });
-        expectInOrder(result.notice, [
-          'no total',
-          'page is full',
-          'more postal codes may match',
-          'Raise limit (max 100)',
-          'narrow with countries',
-        ]);
+        expect(result.notice).toBe('More postal codes match; call again with offset 3.');
+        expect(result.nextOffset).toBe(3);
       }
     });
 
-    it('names the radius in mode nearby', async () => {
-      serve({ nearby: postalRowsBody(2) });
-      const result = page(await run({ mode: 'nearby', lat: 47.6, lng: -122.33, limit: 2 }));
-      expect(result).toMatchObject({ truncated: true, shown: 2, cap: 2 });
-      expectInOrder(result.notice, [
-        'no total',
-        'page is full',
-        'within 10 km',
-        'Raise limit (max 100)',
-      ]);
-      const wide = page(
-        await run({ mode: 'nearby', lat: 47.6, lng: -122.33, limit: 2, radiusKm: 25.5 }),
+    it('mode nearby: the notice states that more lie within the radius, with no next offset', async () => {
+      servePaged(4);
+      const result = page(await run({ mode: 'nearby', lat: 47.6, lng: -122.33, limit: 3 }));
+      expect(result.notice).toBe(
+        'More postal codes lie within 10 km; raise limit (max 100) to see them.',
       );
-      expect(wide.notice).toContain('within 25.5 km');
+      expect(result).not.toHaveProperty('nextOffset');
+      const wide = page(
+        await run({ mode: 'nearby', lat: 47.6, lng: -122.33, limit: 3, radiusKm: 25.5 }),
+      );
+      expect(wide.notice).toBe(
+        'More postal codes lie within 25.5 km; raise limit (max 100) to see them.',
+      );
     });
 
-    it('at the maximum limit there is no raise-limit clause, only narrowing', async () => {
-      serve({ search: postalRowsBody(100) });
+    it('at the maximum limit in mode code the notice still pages, and 100 rows are shown', async () => {
+      const fetchFake = servePaged(101);
       const result = page(await run({ mode: 'code', postalCode: '98101', limit: 100 }));
-      expect(result).toMatchObject({ truncated: true, shown: 100, cap: 100 });
-      expectInOrder(result.notice, ['page is full', 'Narrow with countries']);
-      expect(result.notice).not.toContain('Raise limit');
+      expect(result).toMatchObject({ truncated: true, shown: 100, cap: 100, nextOffset: 100 });
+      expect(result.postalCodes).toHaveLength(100);
+      expect(result.notice).toBe('More postal codes match; call again with offset 100.');
+      expect(sent(fetchFake)).toContainEqual(['maxRows', '101']);
     });
 
     it('at the maximum limit in mode nearby, says it is the most one call returns', async () => {
-      serve({ nearby: postalRowsBody(100) });
+      servePaged(101);
       const result = page(await run({ mode: 'nearby', lat: 47.6, lng: -122.33, limit: 100 }));
-      expect(result.truncated).toBe(true);
-      expectInOrder(result.notice, ['page is full', '100 is the most one call returns']);
-      expect(result.notice).not.toContain('Raise limit');
+      expect(result).toMatchObject({ truncated: true, shown: 100, cap: 100 });
+      expect(result.notice).toBe(
+        'More postal codes lie within 10 km; 100 is the most one call returns, so query again from other points in the area to reach them.',
+      );
+    });
+
+    it('at the maximum limit with exactly 100 rows, stays quiet', async () => {
+      servePaged(100);
+      const result = page(await run({ mode: 'nearby', lat: 47.6, lng: -122.33, limit: 100 }));
+      expect(result).toMatchObject({ truncated: false, shown: 100, cap: 100 });
+      expect(result).not.toHaveProperty('notice');
     });
 
     it('stays quiet one row short of the limit', async () => {
@@ -550,10 +718,112 @@ describe('notices', () => {
       expect(result.notice).toBeUndefined();
     });
 
-    it('treats limit 1 with one row as a full page', async () => {
-      serve({ search: postalRowsBody(1) });
-      const result = page(await run({ mode: 'code', postalCode: '98101', limit: 1 }));
-      expect(result.truncated).toBe(true);
+    it('treats a single row at limit 1 as complete, and as truncated only when a second row comes back', async () => {
+      servePaged(1);
+      const alone = page(await run({ mode: 'code', postalCode: '98101', limit: 1 }));
+      expect(alone).toMatchObject({ truncated: false, shown: 1, cap: 1 });
+      expect(alone).not.toHaveProperty('notice');
+      servePaged(2);
+      const followed = page(await run({ mode: 'code', postalCode: '98101', limit: 1 }));
+      expect(followed).toMatchObject({ truncated: true, shown: 1, cap: 1, nextOffset: 1 });
+      expect(followed.postalCodes.map((row) => row.postalCode)).toEqual(['98101']);
+    });
+  });
+
+  describe('offset paging', () => {
+    it('two consecutive pages at limit 100 share and skip no row', async () => {
+      servePaged(150);
+      const lookup = { mode: 'place_name', placeName: 'London', countries: 'US', limit: 100 };
+      const first = page(await run(lookup));
+      expect(first).toMatchObject({ truncated: true, shown: 100, nextOffset: 100 });
+      const second = page(await run({ ...lookup, offset: first.nextOffset }));
+      expect(second).toMatchObject({ truncated: false, shown: 50 });
+      expect(second).not.toHaveProperty('nextOffset');
+      expect(second).not.toHaveProperty('notice');
+      expect([...first.postalCodes, ...second.postalCodes].map((row) => row.postalCode)).toEqual(
+        codesFrom(0, 150),
+      );
+    });
+
+    it('a mid-walk page names the next offset, offset + limit', async () => {
+      servePaged(150);
+      const result = page(await run({ mode: 'code', postalCode: '98101', limit: 20, offset: 40 }));
+      expect(result.postalCodes.map((row) => row.postalCode)).toEqual(codesFrom(40, 20));
+      expect(result).toMatchObject({ truncated: true, shown: 20, nextOffset: 60 });
+      expect(result.notice).toBe('More postal codes match; call again with offset 60.');
+    });
+
+    it('clamps nextOffset to 5000 and names the rows that page repeats', async () => {
+      servePaged(5200);
+      const result = page(
+        await run({ mode: 'place_name', placeName: 'London', limit: 100, offset: 4950 }),
+      );
+      expect(result).toMatchObject({ truncated: true, shown: 100, nextOffset: 5000 });
+      expect(result.notice).toBe(
+        "More postal codes match; call again with offset 5000, the last offset GeoNames' free service accepts (its first 50 rows repeat this page).",
+      );
+    });
+
+    it('names a single repeated row in the singular', async () => {
+      servePaged(5200);
+      const result = page(
+        await run({ mode: 'place_name', placeName: 'London', limit: 100, offset: 4901 }),
+      );
+      expect(result.nextOffset).toBe(5000);
+      expect(result.notice).toBe(
+        "More postal codes match; call again with offset 5000, the last offset GeoNames' free service accepts (its first 1 row repeats this page).",
+      );
+    });
+
+    it('does not clamp a next offset of exactly 5000', async () => {
+      servePaged(5200);
+      const result = page(
+        await run({ mode: 'place_name', placeName: 'London', limit: 100, offset: 4900 }),
+      );
+      expect(result.nextOffset).toBe(5000);
+      expect(result.notice).toBe('More postal codes match; call again with offset 5000.');
+    });
+
+    it('at offset 5000 with a further row: truncated, no nextOffset, and the no-later-page notice', async () => {
+      servePaged(5200);
+      const result = page(
+        await run({ mode: 'place_name', placeName: 'London', limit: 100, offset: 5000 }),
+      );
+      expect(result).toMatchObject({ truncated: true, shown: 100, cap: 100 });
+      expect(result.postalCodes.map((row) => row.postalCode)).toEqual(codesFrom(5000, 100));
+      expect(result).not.toHaveProperty('nextOffset');
+      expect(result.notice).toBe(
+        "More postal codes match, but GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries or a more specific postalCode or placeName to reach the rest.",
+      );
+    });
+
+    it('at offset 5000 with nothing after the page: complete, with no notice', async () => {
+      servePaged(5050);
+      const result = page(
+        await run({ mode: 'place_name', placeName: 'London', limit: 100, offset: 5000 }),
+      );
+      expect(result).toMatchObject({ truncated: false, shown: 50 });
+      expect(result).not.toHaveProperty('nextOffset');
+      expect(result).not.toHaveProperty('notice');
+    });
+
+    it('an offset past the last match returns an empty page with the nothing-at-this-offset notice', async () => {
+      const fetchFake = servePaged(59);
+      const result = page(
+        await run({ mode: 'place_name', placeName: 'Seattle', countries: 'US,AF', offset: 59 }),
+      );
+      expect(result).toMatchObject({ postalCodes: [], truncated: false, shown: 0, cap: 10 });
+      expect(result).not.toHaveProperty('nextOffset');
+      expect(result.notice).toBe(
+        'No postal code at offset 59; GeoNames reports no total, so the matches end before this offset or there are none. Call again with a smaller offset.',
+      );
+      expect(endpoints(fetchFake)).toEqual(['postalCodeSearchJSON']);
+    });
+
+    it('an empty page at offset 0 keeps the zero-hit fragments', async () => {
+      serve({ search: EMPTY });
+      const result = page(await run({ mode: 'code', postalCode: '00000', offset: 0 }));
+      expect(result.notice).toMatch(/^No postal code matched; check the spelling/);
     });
   });
 
@@ -567,15 +837,22 @@ describe('notices', () => {
     it('mode place_name: names the place inline and markdown-inert', async () => {
       serve({ search: EMPTY });
       const plain = page(await run({ mode: 'place_name', placeName: 'Nowhereville' }));
-      expectInOrder(plain.notice, ['Nowhereville', 'placeName']);
-      const hostile = page(
-        await run({ mode: 'place_name', placeName: 'q[x](http://e.test) <b>\r\n## Heading' }),
+      expect(plain.notice).toBe(
+        'No postal code matched "Nowhereville"; check the spelling of placeName.',
       );
-      expectInOrder(hostile.notice, [
-        'q\\[x\\](http\\[:\\]//e.test) &lt;b&gt;  ## Heading',
-        'placeName',
-      ]);
-      expect(hostile.notice).not.toMatch(/[\r\n]/);
+      const placeName = 'q[x](http://e.test) <b>\r\n## Heading';
+      const hostile = await run({ mode: 'place_name', placeName });
+      expect(page(hostile).notice).toBe(
+        `No postal code matched "${placeName}"; check the spelling of placeName.`,
+      );
+      const text = allText(hostile);
+      const escaped =
+        '> No postal code matched "q\\[x\\](http\\[:\\]//e.test) &lt;b&gt;  ## Heading"; check the spelling of placeName.';
+      expect(text).toContain(`\n${escaped}`);
+      expect(text.split('\n')).toContain(escaped);
+      expect(text).not.toContain('<b>');
+      expect(headingLines(text)).toEqual(['## GeoNames postal codes (mode place_name)']);
+      expect(text.split('\n').filter((line) => line.startsWith('>'))).toEqual([escaped]);
     });
 
     it('mode nearby: raise the radius, naming it', async () => {
@@ -635,9 +912,9 @@ describe('notices', () => {
     it('countries without postal data are named, from the cached coverage list', async () => {
       const fetchFake = serve({ search: EMPTY });
       const result = page(
-        await run({ mode: 'code', postalCode: '12345', countries: 'XX,gb,nl,yy' }),
+        await run({ mode: 'code', postalCode: '12345', countries: 'AF,gb,nl,aq' }),
       );
-      expectInOrder(result.notice, ['no postal data for XX, YY', 'postal_countries']);
+      expectInOrder(result.notice, ['no postal data for AF, AQ', 'postal_countries']);
       expect(endpoints(fetchFake)).toEqual(['postalCodeSearchJSON', 'postalCodeCountryInfoJSON']);
       expect(sent(fetchFake, 1)).toEqual([]);
     });
@@ -651,20 +928,20 @@ describe('notices', () => {
     it('joins every fragment that applies, in order', async () => {
       serve({ search: EMPTY });
       const result = page(
-        await run({ mode: 'code', postalCode: '98101-1234', countries: 'IE,XX' }),
+        await run({ mode: 'code', postalCode: '98101-1234', countries: 'IE,AF' }),
       );
       expectInOrder(result.notice, [
         '5-digit US ZIP',
         'Eircode routing key',
-        'no postal data for XX',
+        'no postal data for AF',
         'postal_countries',
       ]);
     });
 
     it('reads the coverage list once for repeated zero-hit lookups', async () => {
       const fetchFake = serve({ search: EMPTY });
-      await run({ mode: 'code', postalCode: '12345', countries: 'XX' });
-      await run({ mode: 'place_name', placeName: 'Nowhere', countries: 'YY' });
+      await run({ mode: 'code', postalCode: '12345', countries: 'AF' });
+      await run({ mode: 'place_name', placeName: 'Nowhere', countries: 'AQ' });
       expect(
         endpoints(fetchFake).filter((name) => name === 'postalCodeCountryInfoJSON'),
       ).toHaveLength(1);
@@ -675,7 +952,7 @@ describe('notices', () => {
       await run({
         mode: 'code',
         postalCode: '12345',
-        countries: 'XX',
+        countries: 'AF',
         geonamesUsername: CALLER_USERNAME,
       });
       for (const url of requestedUrls(fetchFake)) {
@@ -685,12 +962,261 @@ describe('notices', () => {
 
     it('does not check coverage when there is a hit, or no country filter', async () => {
       const hit = serve();
-      await run({ mode: 'code', postalCode: '98101', countries: 'XX' });
+      await run({ mode: 'code', postalCode: '98101', countries: 'AF' });
       expect(endpoints(hit)).toEqual(['postalCodeSearchJSON']);
       const noFilter = serve({ search: EMPTY });
       await run({ mode: 'code', postalCode: '00000' });
       expect(endpoints(noFilter)).toEqual(['postalCodeSearchJSON']);
     });
+  });
+});
+
+describe('a limit above the 100 cap', () => {
+  const FIELDS = {
+    code: { mode: 'code', postalCode: '98101' },
+    place_name: { mode: 'place_name', placeName: 'Seattle' },
+    nearby: { mode: 'nearby', lat: 47.6, lng: -122.33 },
+  } as const;
+  const maxRows = (fetchFake: ReturnType<typeof serve>) =>
+    requestedUrls(fetchFake).map((url) => url.searchParams.get('maxRows'));
+
+  it.each([101, 200, 1000])(
+    'mode code: limit %i sends maxRows 101, returns cap 100, and names the clamp before the next offset',
+    async (limit) => {
+      const fetchFake = servePaged(150);
+      const result = await run({ ...FIELDS.code, limit });
+      expect(maxRows(fetchFake)).toEqual(['101']);
+      const notice = `${CLAMP(limit)} More postal codes match; call again with offset 100.`;
+      expect(page(result)).toMatchObject({
+        cap: 100,
+        shown: 100,
+        truncated: true,
+        nextOffset: 100,
+        notice,
+      });
+      expect(page(result).postalCodes.map((row) => row.postalCode)).toEqual(codesFrom(0, 100));
+      expect(allText(result).split('\n')).toContain('**cap:** 100');
+      expect(quotedLines(allText(result))).toEqual([`> ${notice}`]);
+    },
+  );
+
+  it('mode place_name: the next page of a clamped walk starts where the capped page ended', async () => {
+    servePaged(250);
+    const first = page(await run({ ...FIELDS.place_name, limit: 200 }));
+    expect(first.notice).toBe(`${CLAMP(200)} More postal codes match; call again with offset 100.`);
+    const second = page(await run({ ...FIELDS.place_name, limit: 200, offset: first.nextOffset }));
+    expect(second.postalCodes.map((row) => row.postalCode)).toEqual(codesFrom(100, 100));
+    expect(second).toMatchObject({ cap: 100, truncated: true, nextOffset: 200 });
+  });
+
+  it.each([101, 200, 1000])(
+    'mode nearby: limit %i names the clamp once and routes to other points, never to a larger limit',
+    async (limit) => {
+      const fetchFake = servePaged(150);
+      const result = await run({ ...FIELDS.nearby, limit });
+      expect(maxRows(fetchFake)).toEqual(['101']);
+      const notice = `${CLAMP(limit)} More postal codes lie within 10 km; query again from other points in the area to reach them.`;
+      expect(page(result)).toMatchObject({ cap: 100, shown: 100, truncated: true, notice });
+      expect(page(result)).not.toHaveProperty('nextOffset');
+      expect(page(result).notice).not.toContain('most one call returns');
+      expect(page(result).notice).not.toContain('raise limit');
+      expect(quotedLines(allText(result))).toEqual([`> ${notice}`]);
+    },
+  );
+
+  it('names the clamp before the offset-5000 continuation and before the no-later-page fragment', async () => {
+    servePaged(5200);
+    const overlapping = page(await run({ ...FIELDS.place_name, limit: 200, offset: 4950 }));
+    expect(overlapping).toMatchObject({ cap: 100, nextOffset: 5000 });
+    expect(overlapping.notice).toBe(
+      `${CLAMP(200)} More postal codes match; call again with offset 5000, the last offset GeoNames' free service accepts (its first 50 rows repeat this page).`,
+    );
+    const last = page(await run({ ...FIELDS.place_name, limit: 200, offset: 5000 }));
+    expect(last).toMatchObject({ cap: 100, truncated: true });
+    expect(last).not.toHaveProperty('nextOffset');
+    expect(last.notice).toBe(
+      `${CLAMP(200)} More postal codes match, but GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries or a more specific postalCode or placeName to reach the rest.`,
+    );
+  });
+
+  it.each([
+    [40, 'code'],
+    [100, 'code'],
+    [100, 'nearby'],
+  ] as const)('says nothing of the clamp when all %i rows fit (mode %s)', async (total, mode) => {
+    const fetchFake = servePaged(total);
+    const result = await run({ ...FIELDS[mode], limit: 200 });
+    expect(maxRows(fetchFake)).toEqual(['101']);
+    expect(page(result)).toMatchObject({ cap: 100, shown: total, truncated: false });
+    expect(page(result)).not.toHaveProperty('notice');
+    expect(allText(result).split('\n')).toContain('**cap:** 100');
+  });
+
+  it('says nothing of the clamp on a zero-hit or past-the-end page', async () => {
+    serve({ search: EMPTY, nearby: EMPTY });
+    const none = page(await run({ mode: 'code', postalCode: '00000', limit: 500 }));
+    expect(none).toMatchObject({ cap: 100, shown: 0, truncated: false });
+    expect(none.notice).toBe(
+      'No postal code matched; check the spelling, or try mode place_name with the town name.',
+    );
+    const nowhere = page(await run({ mode: 'nearby', lat: 30, lng: -40, limit: 500 }));
+    expect(nowhere).toMatchObject({ cap: 100, shown: 0 });
+    expect(nowhere.notice).toBe('No postal code within 10 km; raise radiusKm (max 30).');
+    servePaged(59);
+    const past = page(await run({ ...FIELDS.place_name, limit: 500, offset: 59 }));
+    expect(past).toMatchObject({ cap: 100, shown: 0 });
+    expect(past.notice).toBe(
+      'No postal code at offset 59; GeoNames reports no total, so the matches end before this offset or there are none. Call again with a smaller offset.',
+    );
+  });
+});
+
+describe('postal codes outside the listed countries', () => {
+  const london = (countries?: unknown) =>
+    run({
+      mode: 'place_name',
+      placeName: 'London',
+      ...(countries === undefined ? {} : { countries }),
+    });
+  /** Files row `index` under the country at that position, GB past the end. */
+  const filedUnder =
+    (...codes: string[]) =>
+    (index: number) =>
+      codes[index] ?? 'GB';
+
+  it('relays every row as GeoNames returned it, territories included', async () => {
+    serve({ search: POSTAL_LONDON_GB_BODY });
+    const result = page(await london(['GB']));
+    expect(
+      result.postalCodes.map(({ postalCode, countryCode }) => [postalCode, countryCode]),
+    ).toEqual([
+      ['IM6', 'IM'],
+      ['EC4Y 9BE', 'GB'],
+      ['E6 2DW', 'GB'],
+      ['E6 2DX', 'GB'],
+    ]);
+    expect(result).toMatchObject({ shown: 4, truncated: false });
+  });
+
+  it.each([['GB'], ['uk'], [['gbr']], [['826']]])(
+    'names IM, outside countries %j, in the notice of both surfaces',
+    async (countries) => {
+      serve({ search: POSTAL_LONDON_GB_BODY });
+      const result = await london(countries);
+      expect(page(result).notice).toBe(OUTSIDE('IM'));
+      expect(quotedLines(allText(result))).toEqual([`> ${OUTSIDE('IM')}`]);
+    },
+  );
+
+  it('names IM in mode code too', async () => {
+    serve({ search: POSTAL_LONDON_GB_BODY });
+    const result = page(await run({ mode: 'code', postalCode: 'IM6', countries: 'GB' }));
+    expect(result.notice).toBe(OUTSIDE('IM'));
+  });
+
+  it.each([[['GB', 'IM']], ['uk, IMN'], [['826', '833']]])(
+    'adds nothing when countries %j lists every code on the page',
+    async (countries) => {
+      serve({ search: POSTAL_LONDON_GB_BODY });
+      const result = page(await london(countries));
+      expect(result.postalCodes).toHaveLength(4);
+      expect(result).not.toHaveProperty('notice');
+    },
+  );
+
+  it('adds nothing to a lookup without countries', async () => {
+    serve({ search: POSTAL_LONDON_GB_BODY });
+    const result = page(await london());
+    expect(result.postalCodes).toHaveLength(4);
+    expect(result).not.toHaveProperty('notice');
+  });
+
+  it('names each outside code once, in the order the page holds them', async () => {
+    servePaged(5, filedUnder('IM', 'JE', 'GB', 'IM', 'GG'));
+    const result = page(await london('GB'));
+    expect(result.notice).toBe(OUTSIDE('IM, JE, and GG'));
+  });
+
+  it('reads the rows on the page, not the row past it', async () => {
+    servePaged(4, filedUnder('GB', 'GB', 'GB', 'IM'));
+    const result = page(
+      await run({ mode: 'place_name', placeName: 'London', countries: 'GB', limit: 3 }),
+    );
+    expect(result).toMatchObject({ truncated: true, shown: 3 });
+    expect(result.notice).toBe('More postal codes match; call again with offset 3.');
+  });
+
+  it('joins the continuation and itself in one notice, itself last', async () => {
+    servePaged(4, filedUnder('IM'));
+    const result = await run({
+      mode: 'place_name',
+      placeName: 'London',
+      countries: 'GB',
+      limit: 3,
+    });
+    const notice = `More postal codes match; call again with offset 3. ${OUTSIDE('IM')}`;
+    expect(page(result)).toMatchObject({ truncated: true, notice });
+    expect(quotedLines(allText(result))).toEqual([`> ${notice}`]);
+  });
+
+  it('joins the clamp, the continuation, and itself in one notice, itself last', async () => {
+    servePaged(150, filedUnder('IM'));
+    const result = await run({
+      mode: 'place_name',
+      placeName: 'London',
+      countries: 'GB',
+      limit: 200,
+    });
+    const notice = `${CLAMP(200)} More postal codes match; call again with offset 100. ${OUTSIDE('IM')}`;
+    expect(page(result)).toMatchObject({ cap: 100, truncated: true, nextOffset: 100, notice });
+    expect(quotedLines(allText(result))).toEqual([`> ${notice}`]);
+  });
+
+  it('joins the clamp and the offset-5000 continuation ahead of itself', async () => {
+    servePaged(5200, (index) => (index === 4960 ? 'JE' : 'GB'));
+    const result = page(
+      await run({
+        mode: 'place_name',
+        placeName: 'London',
+        countries: 'GB',
+        limit: 200,
+        offset: 4950,
+      }),
+    );
+    expect(result.notice).toBe(
+      `${CLAMP(200)} More postal codes match; call again with offset 5000, the last offset GeoNames' free service accepts (its first 50 rows repeat this page). ${OUTSIDE('JE')}`,
+    );
+  });
+
+  it('joins the no-later-page fragment ahead of itself', async () => {
+    servePaged(5200, (index) => (index === 5000 ? 'IM' : 'GB'));
+    const result = page(
+      await run({
+        mode: 'place_name',
+        placeName: 'London',
+        countries: 'GB',
+        limit: 100,
+        offset: 5000,
+      }),
+    );
+    expect(result).not.toHaveProperty('nextOffset');
+    expect(result.notice).toBe(
+      `More postal codes match, but GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries or a more specific postalCode or placeName to reach the rest. ${OUTSIDE('IM')}`,
+    );
+  });
+
+  it('leaves a zero-hit or past-the-end notice alone', async () => {
+    serve({ search: EMPTY });
+    expect(page(await london('GB')).notice).toBe(
+      'No postal code matched "London"; check the spelling of placeName.',
+    );
+    servePaged(3, () => 'IM');
+    const past = page(
+      await run({ mode: 'place_name', placeName: 'London', countries: 'GB', offset: 3 }),
+    );
+    expect(past.notice).toBe(
+      'No postal code at offset 3; GeoNames reports no total, so the matches end before this offset or there are none. Call again with a smaller offset.',
+    );
   });
 });
 
@@ -708,6 +1234,7 @@ describe('mode_fields_mismatch', () => {
       { mode: 'nearby', lat: 47.6, lng: -122.3, countries: 'US' },
       'countries',
     ],
+    ['nearby with an offset', { mode: 'nearby', lat: 47.6, lng: -122.3, offset: 3 }, 'offset'],
   ])(
     '%s: ValidationError naming the field, with the contract recovery',
     async (_label, input, message) => {
@@ -725,6 +1252,19 @@ describe('mode_fields_mismatch', () => {
     serve({}, { server: false });
     const error = errorOf(await run({ mode: 'code' }));
     expect(error.data?.reason).toBe('mode_fields_mismatch');
+  });
+
+  it('names the offset rule in mode nearby, in the message and the declared when and recovery', async () => {
+    serve();
+    const error = errorOf(await run({ mode: 'nearby', lat: 47.6, lng: -122.3, offset: 3 }));
+    expect(error.message).toBe(
+      'mode nearby takes no offset: it always returns the nearest postal codes first. Call again without offset.',
+    );
+    const declared = findPostalCodesTool.errors?.find(
+      ({ reason }) => reason === 'mode_fields_mismatch',
+    );
+    expect(declared?.when).toContain('offset above 0 in mode nearby');
+    expect(declared?.recovery).toContain('without countries or offset');
   });
 
   it('is not raised for a mode whose own fields are present, whatever else is set', async () => {
@@ -774,6 +1314,7 @@ describe('alpha-3 and numeric country codes', () => {
     ['aaa', ['AAA'], 'No country has the code AAA.'],
     ['999', ['999'], 'No country has the code 999.'],
     [['US', 'ZZZ', 'irl', '000'], ['ZZZ', '000'], 'No country has the codes ZZZ, 000.'],
+    [['US', 'EL'], ['EL'], 'No country has the code EL.'],
   ])('fails %j as unknown_country_code before any request', async (countries, unknown, opening) => {
     const fetchFake = serve();
     const result = await run({ mode: 'code', postalCode: '98101', countries });
@@ -787,6 +1328,49 @@ describe('alpha-3 and numeric country codes', () => {
     expect(allText(result)).toContain(`Recovery: ${RECOVERY}`);
     expect(allText(result)).toContain('reason unknown_country_code');
     expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it.each(['EL', 'XX', 'EU', 'FX', 'TP', 'ZR', 'SU'])(
+    'fails the alpha-2 code %s beside a known one, in any case, before any request',
+    async (code) => {
+      const fetchFake = serve();
+      for (const written of [code, code.toLowerCase()]) {
+        const error = errorOf(
+          await run({ mode: 'place_name', placeName: 'Athens', countries: ['US', written] }),
+        );
+        expect(error.data).toMatchObject({ reason: 'unknown_country_code', countries: [code] });
+      }
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('sends the retired AN, CS, and YU upstream, and a miss lands on the no-postal-data notice', async () => {
+    const fetchFake = serve({ search: EMPTY });
+    const result = page(
+      await run({ mode: 'place_name', placeName: 'Prague', countries: 'gb, cs, Yu, an' }),
+    );
+    expect(countryParams(fetchFake)).toEqual([
+      ['country', 'GB'],
+      ['country', 'CS'],
+      ['country', 'YU'],
+      ['country', 'AN'],
+    ]);
+    expect(endpoints(fetchFake)).toEqual(['postalCodeSearchJSON', 'postalCodeCountryInfoJSON']);
+    expect(result.notice).toBe(
+      'GeoNames has no postal data for CS, YU, AN; see geonames_list_reference topic postal_countries.',
+    );
+  });
+
+  it('still sends UK as GB, and gr, GRC, and 300 as GR', async () => {
+    const fetchFake = serve();
+    await run({ mode: 'place_name', placeName: 'Athens', countries: 'UK, uk, gr, GRC, 300' });
+    expect(countryParams(fetchFake)).toEqual([
+      ['country', 'GB'],
+      ['country', 'GB'],
+      ['country', 'GR'],
+      ['country', 'GR'],
+      ['country', 'GR'],
+    ]);
   });
 
   it('declares the recovery that points to geonames_get_countries', () => {
@@ -814,6 +1398,9 @@ describe('alpha-3 and numeric country codes', () => {
       errorOf(await run({ mode: 'code', postalCode: '98101', countries: 'ZZZ' })).data?.reason,
     ).toBe('unknown_country_code');
     expect(
+      errorOf(await run({ mode: 'code', postalCode: '98101', countries: 'EL' })).data?.reason,
+    ).toBe('unknown_country_code');
+    expect(
       errorOf(await run({ mode: 'code', postalCode: '98101', countries: 'IRL' })).data?.reason,
     ).toBe('username_required');
   });
@@ -829,6 +1416,14 @@ describe('alpha-3 and numeric country codes', () => {
       'numeric',
       'Modes code and place_name only.',
     ]);
+  });
+
+  it('says a listed country also returns its territories, never that only listed countries come back', () => {
+    const { description } = findPostalCodesTool.input.shape.countries;
+    expect(description).toContain(
+      "A listed country also returns the territories GeoNames files under it (GB also returns IM, JE, and GG), each postal code's countryCode naming its own country.",
+    );
+    expect(description).not.toMatch(/\bonly postal codes\b|\bkeep only\b/i);
   });
 });
 
@@ -874,14 +1469,33 @@ describe('enrichment on the production output path', () => {
     expect(result.structuredContent).toMatchObject({ truncated: false, shown: 2, cap: 50 });
   });
 
-  it('writes the fields on a full page', async () => {
-    serve({ search: postalRowsBody(4) });
+  it('writes the fields on a truncated page, in structuredContent and the content[] trailer', async () => {
+    servePaged(5);
     const result = await run({ mode: 'code', postalCode: '98101', limit: 4 });
+    const notice = 'More postal codes match; call again with offset 4.';
+    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 4, cap: 4, notice });
+    const lines = allText(result).split('\n');
+    expect(lines).toContain('**truncated:** true');
+    expect(lines).toContain(`> ${notice}`);
+  });
+
+  it('writes the neutral fields on an exactly full page', async () => {
+    servePaged(4);
+    const result = await run({ mode: 'code', postalCode: '98101', limit: 4 });
+    expect(result.structuredContent).toMatchObject({ truncated: false, shown: 4, cap: 4 });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(allText(result).split('\n')).toContain('**truncated:** false');
+  });
+
+  it('writes the neutral fields on an empty page past the last match', async () => {
+    servePaged(3);
+    const result = await run({ mode: 'code', postalCode: '98101', offset: 3 });
     expect(result.structuredContent).toMatchObject({
-      truncated: true,
-      shown: 4,
-      cap: 4,
-      notice: expect.stringContaining('this page is full'),
+      postalCodes: [],
+      truncated: false,
+      shown: 0,
+      cap: 10,
+      notice: expect.stringMatching(/^No postal code at offset 3;/),
     });
   });
 });
@@ -956,18 +1570,31 @@ describe('format()', () => {
     expect(rows[3]).toMatch(/\| Not available \| Not available \|$/);
   });
 
-  it('says so when no postal code matched', async () => {
+  it('says so when the page holds no postal code, without claiming nothing matched', async () => {
     serve({ search: EMPTY });
     const result = await run({ mode: 'place_name', placeName: 'Nowhere' });
-    expect(textOf(result)).toContain('No postal codes matched.');
+    expect(textOf(result)).toBe(
+      '## GeoNames postal codes (mode place_name)\n\nNo postal codes on this page.',
+    );
     expect(tableRows(textOf(result))).toEqual([]);
-    expect(allText(result)).toContain(page(result).notice ?? 'missing notice');
+    expect(quotedLines(allText(result))).toEqual([`> ${page(result).notice}`]);
   });
 
-  it('puts a full-page notice in content[], matching structuredContent', async () => {
-    serve({ search: postalRowsBody(5) });
-    const result = await run({ mode: 'code', postalCode: '98101', limit: 5 });
-    expect(allText(result)).toContain(page(result).notice ?? 'missing notice');
+  it('closes with the next page line when nextOffset is set, matching structuredContent', async () => {
+    servePaged(30);
+    const result = await run({ mode: 'place_name', placeName: 'Seattle', offset: 10 });
+    expect(page(result).nextOffset).toBe(20);
+    expect(textOf(result)).toMatch(/\| 98120 \| Seattle \| US \|[^\n]*\n\nNext page: offset 20\.$/);
+  });
+
+  it.each([
+    ['the last page', { mode: 'place_name', placeName: 'Seattle', offset: 20 }],
+    ['mode nearby', { mode: 'nearby', lat: 47.6, lng: -122.33 }],
+  ])('has no next page line on %s', async (_label, input) => {
+    servePaged(30);
+    const result = await run(input);
+    expect(page(result)).not.toHaveProperty('nextOffset');
+    expect(textOf(result)).not.toContain('Next page');
   });
 
   it('keeps hostile upstream text inside its table cell, one line per row', async () => {
@@ -1144,7 +1771,7 @@ describe('declared error contracts', () => {
       const result = await run({
         mode: 'code',
         postalCode: '12345',
-        countries: 'XX',
+        countries: 'AF',
         geonamesUsername: CALLER_USERNAME,
       });
       const success = page(result);
@@ -1167,7 +1794,7 @@ describe('declared error contracts', () => {
         await run({
           mode: 'code',
           postalCode: '98101-1234',
-          countries: 'IE,XX',
+          countries: 'IE,AF',
           geonamesUsername: CALLER_USERNAME,
         }),
       );
@@ -1188,7 +1815,7 @@ describe('declared error contracts', () => {
       });
       const result = await runToolContract(
         findPostalCodesTool,
-        { mode: 'code', postalCode: '12345', countries: 'XX' } as Input,
+        { mode: 'code', postalCode: '12345', countries: 'AF' } as Input,
         { context: { signal: controller.signal } },
       );
       expect(errorOf(result).code).toBe(JsonRpcErrorCode.RequestCancelled);

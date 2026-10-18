@@ -1,7 +1,8 @@
 /**
  * @fileoverview ISO 3166-1 alpha-2, alpha-3, and numeric codes of the 250 GeoNames
  * countries, bundled so the country filters can map alpha-3 and numeric codes to the
- * alpha-2 GeoNames takes inside a synchronous schema preprocess.
+ * alpha-2 GeoNames takes inside a synchronous schema preprocess, and refuse before any
+ * request a code GeoNames files no feature under (the 250 plus three retired codes).
  *
  * Source: https://secure.geonames.org/countryInfoJSON (`countryCode`, `isoAlpha3`,
  * `isoNumeric`), fetched 2026-10-01 (250 rows). Kosovo (XK/XKX) has no ISO numeric code
@@ -286,9 +287,25 @@ for (const { alpha2, alpha3, numeric } of COUNTRY_CODES) {
 }
 
 /**
+ * Retired codes GeoNames still files historical-country records under (allCountries dump
+ * of 2026-10-18: AN 2 features, CS 2, YU 1); no country row carries them.
+ */
+const RETIRED_CODES = new Set(['AN', 'CS', 'YU']);
+
+const FILED_CODES = new Set([...COUNTRY_CODES.map(({ alpha2 }) => alpha2), ...RETIRED_CODES]);
+
+/**
  * The alpha-2 code for an upper-case alpha-3 or three-digit numeric code; `undefined` for
  * any other code, an alpha-2 code included.
  */
 export function alpha2For(code: string): string | undefined {
   return TO_ALPHA2.get(code);
+}
+
+/**
+ * Whether GeoNames files features under the upper-case alpha-2 `code`: one of the 250
+ * countries, or a retired code in {@link RETIRED_CODES}.
+ */
+export function isFiledCountryCode(code: string): boolean {
+  return FILED_CODES.has(code);
 }

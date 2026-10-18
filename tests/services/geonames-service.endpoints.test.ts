@@ -14,6 +14,7 @@ import {
   CHILDREN_OVERFLOW_BODY,
   COUNTRY_INFO_BODY,
   EMPTY_GEONAMES_BODY,
+  GET_MONACO_COUNTRY_BODY,
   GET_SEATTLE_BODY,
   GET_SPARSE_BODY,
   HIERARCHY_EARTH_ONLY_BODY,
@@ -32,10 +33,12 @@ import {
   TIMEZONE_OFFSHORE_BODY,
   TIMEZONE_PARIS_BODY,
   TIMEZONE_REYKJAVIK_BODY,
+  TIMEZONE_TONGA_DATED_BODY,
   textResponse,
 } from '../fixtures/geonames-upstream.js';
 import { SUBDIVISION_HUDSON_BUFFERED_BODY } from '../fixtures/geonames-upstream-spatial.js';
 import {
+  fixedNow,
   inertCreatePacer,
   makeContext,
   makeService,
@@ -215,6 +218,10 @@ describe('search', () => {
       cities: 'cities1000',
       boundingBox: { north: 1, south: 0, east: 1, west: 0 },
       orderBy: 'population',
+      adminCode1: 'WA',
+      adminCode2: '033',
+      adminCode3: '7174408',
+      adminCode4: 'X',
       limit: 1,
       offset: 0,
     });
@@ -224,6 +231,10 @@ describe('search', () => {
       'name_equals',
       'name_startsWith',
       'country',
+      'adminCode1',
+      'adminCode2',
+      'adminCode3',
+      'adminCode4',
       'featureClass',
       'featureCode',
       'cities',
@@ -239,9 +250,66 @@ describe('search', () => {
     expect([...url.searchParams.keys()].every((key) => allowed.has(key))).toBe(true);
   });
 
-  it('omits orderby for relevance ordering', async () => {
-    const url = await run({ query: 'x', orderBy: 'relevance', limit: 1, offset: 0 });
-    expect(url.searchParams.has('orderby')).toBe(false);
+  it.each([undefined, 'name_required', 'any_field', 'exact_name', 'name_prefix'] as const)(
+    'sends each explicit orderBy with match %s, and no orderby when it is omitted',
+    async (match) => {
+      const base = { query: 'x', ...(match ? { match } : {}), limit: 1, offset: 0 };
+      for (const orderBy of ['relevance', 'population'] as const) {
+        const url = await run({ ...base, orderBy });
+        expect(url.searchParams.getAll('orderby'), orderBy).toEqual([orderBy]);
+      }
+      expect((await run(base)).searchParams.has('orderby')).toBe(false);
+    },
+  );
+
+  it('sends adminCode1 to adminCode4 as given, right after country', async () => {
+    const url = await run({
+      countries: ['DE'],
+      adminCode1: '02',
+      adminCode2: '091',
+      adminCode3: '09162',
+      adminCode4: '09162000',
+      featureCodes: ['PPLA'],
+      limit: 1,
+      offset: 0,
+    });
+    expect(paramsOf(url)).toEqual([
+      ['country', 'DE'],
+      ['adminCode1', '02'],
+      ['adminCode2', '091'],
+      ['adminCode3', '09162'],
+      ['adminCode4', '09162000'],
+      ['featureCode', 'PPLA'],
+      ['maxRows', '1'],
+      ['startRow', '0'],
+    ]);
+  });
+
+  it('sends only the admin levels it is given', async () => {
+    const url = await run({
+      countries: ['FR'],
+      adminCode1: '11',
+      adminCode3: '923',
+      limit: 1,
+      offset: 0,
+    });
+    expect(paramsOf(url)).toEqual([
+      ['country', 'FR'],
+      ['adminCode1', '11'],
+      ['adminCode3', '923'],
+      ['maxRows', '1'],
+      ['startRow', '0'],
+    ]);
+  });
+
+  it('sends orderby=relevance on a search with no query', async () => {
+    const url = await run({ featureCodes: ['PPLA'], orderBy: 'relevance', limit: 1, offset: 0 });
+    expect(paramsOf(url)).toEqual([
+      ['featureCode', 'PPLA'],
+      ['orderby', 'relevance'],
+      ['maxRows', '1'],
+      ['startRow', '0'],
+    ]);
   });
 
   it('returns normalized rows and the upstream total', async () => {
@@ -365,6 +433,18 @@ describe('getPlace', () => {
     expect(place).not.toHaveProperty('population');
     expect(place).not.toHaveProperty('demElevationInMeters');
     expect(place).not.toHaveProperty('timezone');
+  });
+
+  it("lists no admin level on Monaco's country record, and derives its zone's offsets", async () => {
+    const block = { ...GET_MONACO_COUNTRY_BODY.timezone, gmtOffset: 4, dstOffset: 4 };
+    const { service, account } = setup('getJSON', { ...GET_MONACO_COUNTRY_BODY, timezone: block });
+    const place = await service.getPlace('2993457', account, ctx);
+    expect(place?.adminLevels).toEqual([]);
+    expect(place?.timezone).toEqual({
+      timezoneId: 'Europe/Monaco',
+      gmtOffsetInHours: 1,
+      dstOffsetInHours: 2,
+    });
   });
 
   it('returns undefined for status 11 (HTTP 404), and does not cache the miss', async () => {
@@ -703,19 +783,107 @@ describe('nearby endpoints', () => {
 });
 
 describe('timezone', () => {
-  it('requests timezoneJSON with lat and lng', async () => {
-    const { fetch, service, account } = setup('timezoneJSON', TIMEZONE_PARIS_BODY);
+  /** One timezoneJSON endpoint answering `body`, on a service whose clock reads `iso`. */
+  function setupAt(iso: string, body: unknown = TIMEZONE_PARIS_BODY) {
+    const fetch = routedFetch({ timezoneJSON: () => jsonResponse(body) });
+    const service = makeService(fetch, { now: () => Date.parse(iso) });
+    return { fetch, service, account: service.resolveAccount(undefined) };
+  }
+
+  it('requests timezoneJSON with lat, lng, and a date', async () => {
+    const { fetch, service, account } = setupAt('2026-09-30T13:04:00Z');
     await service.timezone(48.85, 2.35, account, ctx);
     const url = requestedUrls(fetch)[0] as URL;
     expect(url.pathname).toBe('/timezoneJSON');
     expect(paramsOf(url)).toEqual([
       ['lat', '48.85'],
       ['lng', '2.35'],
+      ['date', '2026-10-01'],
     ]);
   });
 
+  it.each([
+    ['Los Angeles in the evening', '2026-10-18T05:46:00Z', 34.0522, -118.2437, '2026-10-17'],
+    ['Tonga, west of the date line', '2026-10-18T05:46:00Z', -21.1394, -175.2018, '2026-10-17'],
+    ['Kiritimati, west of the date line', '2026-10-18T05:54:00Z', 1.8721, -157.4278, '2026-10-17'],
+    ['Auckland, east of the date line', '2026-10-18T05:54:00Z', -36.8485, 174.7633, '2026-10-19'],
+    ['Sydney after local midnight', '2026-10-17T23:26:00Z', -33.8688, 151.2093, '2026-10-18'],
+    ['longitude 0 just before solar noon', '2026-10-18T11:59:59.999Z', 0, 0, '2026-10-17'],
+    ['longitude 0 at solar noon', '2026-10-18T12:00:00.000Z', 0, 0, '2026-10-19'],
+    ['longitude 30 E just before solar noon', '2026-10-18T09:59:59.999Z', 0, 30, '2026-10-17'],
+    ['longitude 30 E at solar noon', '2026-10-18T10:00:00.000Z', 0, 30, '2026-10-19'],
+    ['longitude 180 at 00:00 UTC', '2026-10-18T00:00:00.000Z', 0, 180, '2026-10-19'],
+    ['longitude -180 at 23:59 UTC', '2026-10-18T23:59:00.000Z', 0, -180, '2026-10-17'],
+    ['a year-end evening', '2026-12-31T20:00:00Z', 51.5, 0, '2027-01-01'],
+    ['a New Year morning', '2027-01-01T01:00:00Z', 51.5, 0, '2026-12-31'],
+  ])('sends one request, dated for %s (%s)', async (_label, iso, lat, lng, date) => {
+    const { fetch, service, account } = setupAt(iso);
+    await service.timezone(lat, lng, account, ctx);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(requestedUrls(fetch)[0]?.searchParams.getAll('date')).toEqual([date]);
+  });
+
+  it('picks the date from UTC, whatever the process timezone', async () => {
+    const instant = '2026-10-18T05:46:00Z';
+    const saved = process.env.TZ;
+    const sent: string[] = [];
+    const offsets: number[] = [];
+    try {
+      for (const zone of ['Pacific/Kiritimati', 'America/Los_Angeles']) {
+        process.env.TZ = zone;
+        offsets.push(new Date(Date.parse(instant)).getTimezoneOffset());
+        const { fetch, service, account } = setupAt(instant);
+        await service.timezone(34.0522, -118.2437, account, ctx);
+        sent.push(requestedUrls(fetch)[0]?.searchParams.get('date') ?? '');
+      }
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+    expect(offsets).toEqual([-840, 420]);
+    expect(sent).toEqual(['2026-10-17', '2026-10-17']);
+  });
+
+  it("returns the pair on the point's local date from a real dated answer", async () => {
+    const { fetch, service, account } = setupAt('2026-10-18T07:50:52Z', TIMEZONE_TONGA_DATED_BODY);
+    const result = await service.timezone(-21.1394, -175.2018, account, ctx);
+    expect(requestedUrls(fetch)[0]?.searchParams.get('date')).toBe('2026-10-17');
+    expect(result).toEqual({
+      timezoneId: 'Pacific/Tongatapu',
+      countryCode: 'TO',
+      countryName: 'Tonga',
+      rawOffsetInHours: 13,
+      gmtOffsetInHours: 13,
+      dstOffsetInHours: 13,
+      localTime: '2026-10-18 20:50',
+      sunrise: '2026-10-18 06:07',
+      sunset: '2026-10-18 18:44',
+    });
+  });
+
+  it('never caches: the same point at a later instant sends its own date', async () => {
+    let clock = Date.parse('2026-10-18T05:46:00Z');
+    const fetch = routedFetch({ timezoneJSON: () => jsonResponse(TIMEZONE_PARIS_BODY) });
+    const service = makeService(fetch, { now: () => clock });
+    const account = service.resolveAccount(undefined);
+    await service.timezone(48.85, 2.35, account, ctx);
+    clock = Date.parse('2026-10-18T13:00:00Z');
+    await service.timezone(48.85, 2.35, account, ctx);
+    expect(requestedUrls(fetch).map((url) => url.searchParams.get('date'))).toEqual([
+      '2026-10-17',
+      '2026-10-19',
+    ]);
+  });
+
+  /** One timezoneJSON endpoint answering `body`, on the shared fixed clock. */
+  function setupPinned(body: unknown) {
+    const fetch = routedFetch({ timezoneJSON: () => jsonResponse(body) });
+    const service = makeService(fetch, { now: fixedNow });
+    return { fetch, service, account: service.resolveAccount(undefined) };
+  }
+
   it('parses the full onshore answer', async () => {
-    const { service, account } = setup('timezoneJSON', TIMEZONE_PARIS_BODY);
+    const { service, account } = setupPinned(TIMEZONE_PARIS_BODY);
     await expect(service.timezone(48.85, 2.35, account, ctx)).resolves.toEqual({
       timezoneId: 'Europe/Paris',
       countryCode: 'FR',
@@ -730,7 +898,7 @@ describe('timezone', () => {
   });
 
   it('parses the offshore answer as the three offsets only, the 1 July one taken from the standard offset', async () => {
-    const { service, account } = setup('timezoneJSON', TIMEZONE_OFFSHORE_BODY);
+    const { service, account } = setupPinned(TIMEZONE_OFFSHORE_BODY);
     await expect(service.timezone(30, -40, account, ctx)).resolves.toEqual({
       rawOffsetInHours: -3,
       gmtOffsetInHours: -3,
@@ -739,7 +907,7 @@ describe('timezone', () => {
   });
 
   it('keeps the 0 offsets of a land zone at UTC+0', async () => {
-    const { service, account } = setup('timezoneJSON', TIMEZONE_REYKJAVIK_BODY);
+    const { service, account } = setupPinned(TIMEZONE_REYKJAVIK_BODY);
     await expect(service.timezone(64.1355, -21.8954, account, ctx)).resolves.toMatchObject({
       timezoneId: 'Atlantic/Reykjavik',
       rawOffsetInHours: 0,
@@ -749,23 +917,20 @@ describe('timezone', () => {
   });
 
   it('returns undefined for status 15', async () => {
-    const { service, account } = setup(
-      'timezoneJSON',
-      statusEnvelope(15, 'no timezone information found'),
-    );
+    const { service, account } = setupPinned(statusEnvelope(15, 'no timezone information found'));
     await expect(service.timezone(0, 0, account, ctx)).resolves.toBeUndefined();
   });
 });
 
 describe('postal endpoints', () => {
-  it('postalSearch sends only the supplied lookup keys', async () => {
+  it('postalSearch sends only the supplied lookup keys, and startRow on every call', async () => {
     const { fetch, service, account } = setup('postalCodeSearchJSON', POSTAL_SEARCH_BODY);
     await service.postalSearch(
-      { postalCode: '98101', countries: ['US', 'CA'], limit: 5 },
+      { postalCode: '98101', countries: ['US', 'CA'], limit: 5, offset: 0 },
       account,
       ctx,
     );
-    await service.postalSearch({ placeName: 'Seattle', limit: 5 }, account, ctx);
+    await service.postalSearch({ placeName: 'Seattle', limit: 5, offset: 40 }, account, ctx);
     const [byCode, byName] = requestedUrls(fetch) as [URL, URL];
     expect(byCode.pathname).toBe('/postalCodeSearchJSON');
     expect(paramsOf(byCode)).toEqual([
@@ -773,10 +938,26 @@ describe('postal endpoints', () => {
       ['country', 'US'],
       ['country', 'CA'],
       ['maxRows', '5'],
+      ['startRow', '0'],
     ]);
     expect(paramsOf(byName)).toEqual([
       ['placename', 'Seattle'],
       ['maxRows', '5'],
+      ['startRow', '40'],
+    ]);
+  });
+
+  it('postalSearch caches each offset under its own key', async () => {
+    const { fetch, service, account } = setup('postalCodeSearchJSON', POSTAL_SEARCH_BODY);
+    const lookup = { placeName: 'London', countries: ['GB'], limit: 101 };
+    await service.postalSearch({ ...lookup, offset: 0 }, account, ctx);
+    await service.postalSearch({ ...lookup, offset: 0 }, account, ctx);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await service.postalSearch({ ...lookup, offset: 100 }, account, ctx);
+    await service.postalSearch({ ...lookup, offset: 100 }, account, ctx);
+    expect(requestedUrls(fetch).map((url) => url.searchParams.get('startRow'))).toEqual([
+      '0',
+      '100',
     ]);
   });
 
@@ -795,7 +976,7 @@ describe('postal endpoints', () => {
 
   it('parses rows, with numeric codes as strings and blank admin fields dropped', async () => {
     const { service, account } = setup('postalCodeSearchJSON', POSTAL_SEARCH_BODY);
-    const rows = await service.postalSearch({ postalCode: '9', limit: 5 }, account, ctx);
+    const rows = await service.postalSearch({ postalCode: '9', limit: 5, offset: 0 }, account, ctx);
     expect(rows).toEqual([
       {
         postalCode: '98101',
@@ -833,7 +1014,7 @@ describe('postal endpoints', () => {
   ])('postalSearch returns an empty list for %s', async (_name, body) => {
     const { service, account } = setup('postalCodeSearchJSON', body);
     await expect(
-      service.postalSearch({ postalCode: '00000', limit: 5 }, account, ctx),
+      service.postalSearch({ postalCode: '00000', limit: 5, offset: 0 }, account, ctx),
     ).resolves.toEqual([]);
   });
 });

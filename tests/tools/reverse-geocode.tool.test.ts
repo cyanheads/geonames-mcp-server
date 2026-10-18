@@ -31,10 +31,14 @@ import {
   SUBDIVISION_PARIS_BODY,
   statusEnvelope,
   TIMEZONE_ACCRA_BODY,
+  TIMEZONE_AUCKLAND_DATED_BODY,
   TIMEZONE_OFFSHORE_BODY,
   TIMEZONE_OPEN_PACIFIC_BODY,
   TIMEZONE_PARIS_BODY,
+  TIMEZONE_POLAR_DATED_BODY,
   TIMEZONE_REYKJAVIK_BODY,
+  TIMEZONE_SYDNEY_BODY,
+  TIMEZONE_TONGA_DATED_BODY,
   textResponse,
 } from '../fixtures/geonames-upstream.js';
 import {
@@ -48,6 +52,7 @@ import {
 import {
   allText,
   errorOf,
+  fixedNow,
   headingLines,
   inertCreatePacer,
   installService,
@@ -119,8 +124,11 @@ interface Routes {
   timezone?: Responder;
 }
 
-/** Routes every leg: Paris containment, a Seattle-shaped nearby list, the Atlantic, and Paris time. */
-const serve = (routes: Routes = {}, options: { server?: boolean } = {}) =>
+/**
+ * Routes every leg: Paris containment, a Seattle-shaped nearby list, the Atlantic, and Paris
+ * time, on a service clock pinned at `FIXED_NOW` unless `now` is given.
+ */
+const serve = (routes: Routes = {}, options: { now?: () => number; server?: boolean } = {}) =>
   installService(
     {
       countrySubdivisionJSON: routes.subdivision ?? (() => jsonResponse(SUBDIVISION_PARIS_BODY)),
@@ -129,8 +137,11 @@ const serve = (routes: Routes = {}, options: { server?: boolean } = {}) =>
       findNearbyJSON: routes.features ?? (() => jsonResponse(NEARBY_PEAKS_BODY)),
       timezoneJSON: routes.timezone ?? (() => jsonResponse(TIMEZONE_PARIS_BODY)),
     },
-    options,
+    { now: fixedNow, ...options },
   );
+
+/** A service clock that reads `iso`. */
+const clockAt = (iso: string) => () => Date.parse(iso);
 
 /** Serves an offshore point: containment finds nothing, the ocean answers, nothing is nearby. */
 const serveOffshore = (routes: Routes = {}) =>
@@ -156,6 +167,21 @@ const status =
   (value: number, message: string, http = 200): Responder =>
   () =>
     jsonResponse(statusEnvelope(value, message), http);
+
+/**
+ * Answers a nearby endpoint the way GeoNames does when `total` places lie within the radius:
+ * the nearest `maxRows` of them (geonameIds 5800000 upward).
+ */
+const nearest =
+  (total: number): Responder =>
+  (url) =>
+    jsonResponse({
+      geonames: nearbyPlacesBody(total).geonames.slice(0, Number(url.searchParams.get('maxRows'))),
+    });
+
+/** The geonameIds of the nearest `count` rows {@link nearest} serves. */
+const nearestIds = (count: number) =>
+  Array.from({ length: count }, (_, index) => 5_800_000 + index);
 
 /** A promise settled from outside, to order two legs deterministically. */
 function deferred() {
@@ -217,25 +243,42 @@ describe('input normalization', () => {
     }
   });
 
-  it.each([-1, 51, 1.5, 'five', null])('rejects nearbyLimit %j', async (nearbyLimit) => {
-    const error = errorOf(await run({ ...PARIS, nearbyLimit }));
-    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
-  });
+  it.each([-1, 1001, 1.5, 'five', true, { rows: 5 }])(
+    'rejects nearbyLimit %j before any request',
+    async (nearbyLimit) => {
+      const fetchFake = serve();
+      const error = errorOf(await run({ ...PARIS, nearbyLimit }));
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.issues).toEqual([expect.objectContaining({ path: ['nearbyLimit'] })]);
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
 
-  it('accepts nearbyLimit 0, 1, and 50', async () => {
+  it('accepts nearbyLimit 0 to 1,000, reporting the applied value, held to 50, as cap', async () => {
     serve();
     expect(page(await run({ ...PARIS, nearbyLimit: 0 })).cap).toBe(0);
     expect(page(await run({ ...PARIS, nearbyLimit: 1 })).cap).toBe(1);
     expect(page(await run({ ...PARIS, nearbyLimit: 50 })).cap).toBe(50);
+    expect(page(await run({ ...PARIS, nearbyLimit: 51 })).cap).toBe(50);
+    expect(page(await run({ ...PARIS, nearbyLimit: 1000 })).cap).toBe(50);
   });
 
-  it.each(['', '  '])('reads a blank nearbyLimit (%j) as the default 5', async (blank) => {
-    const fetchFake = serve();
-    expect(page(await run({ ...PARIS, nearbyLimit: blank })).cap).toBe(5);
-    expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual(['maxRows', '5']);
+  it('names the 1,000 ceiling, the 50 cap, the clamp, and the default in the nearbyLimit description', () => {
+    expect(reverseGeocodeTool.input.shape.nearbyLimit.description).toBe(
+      'How many nearest places or features to list, 0 to 1,000. This tool returns at most 50 per call: a larger nearbyLimit is held to 50, and the notice says so when more lie within the radius. Default 5. 0 skips the nearby lookup and its 3 or 4 credits.',
+    );
   });
 
-  it.each([0, -1, 300.01, 301, 'wide', null])('rejects radiusKm %j', async (radiusKm) => {
+  it.each(['', '  ', null])(
+    'reads a blank or null nearbyLimit (%j) as the default 5',
+    async (blank) => {
+      const fetchFake = serve();
+      expect(page(await run({ ...PARIS, nearbyLimit: blank })).cap).toBe(5);
+      expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual(['maxRows', '6']);
+    },
+  );
+
+  it.each([0, -1, 300.01, 301, 'wide', true])('rejects radiusKm %j', async (radiusKm) => {
     const error = errorOf(await run({ ...PARIS, radiusKm }));
     expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
   });
@@ -249,11 +292,14 @@ describe('input normalization', () => {
     ]);
   });
 
-  it.each(['', '  '])('reads a blank radiusKm (%j) as the default 20', async (blank) => {
-    const fetchFake = serve();
-    await run({ ...PARIS, radiusKm: blank });
-    expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual(['radius', '20']);
-  });
+  it.each(['', '  ', null])(
+    'reads a blank or null radiusKm (%j) as the default 20',
+    async (blank) => {
+      const fetchFake = serve();
+      await run({ ...PARIS, radiusKm: blank });
+      expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual(['radius', '20']);
+    },
+  );
 
   it.each(['', '  '])('reads a blank includeTimezone (%j) as false', async (blank) => {
     const fetchFake = serve();
@@ -371,9 +417,37 @@ describe('the upstream sequence', () => {
       ['lat', '48.8566'],
       ['lng', '2.3522'],
       ['radius', '20'],
-      ['maxRows', '5'],
+      ['maxRows', '6'],
     ]);
   });
+
+  it.each([1, 50])(
+    'asks both nearby endpoints for one row past nearbyLimit %i',
+    async (nearbyLimit) => {
+      const fetchFake = serve();
+      await run({ ...PARIS, nearbyLimit });
+      await run({ ...PARIS, nearbyLimit, featureCodes: 'MT' });
+      expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual([
+        'maxRows',
+        String(nearbyLimit + 1),
+      ]);
+      expect(sentTo(fetchFake, 'findNearbyJSON')).toContainEqual([
+        'maxRows',
+        String(nearbyLimit + 1),
+      ]);
+    },
+  );
+
+  it.each([51, 80, 1000])(
+    'asks both nearby endpoints for 51 rows when nearbyLimit %i is held to 50',
+    async (nearbyLimit) => {
+      const fetchFake = serve();
+      await run({ ...PARIS, nearbyLimit });
+      await run({ ...PARIS, nearbyLimit, featureCodes: 'MT' });
+      expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual(['maxRows', '51']);
+      expect(sentTo(fetchFake, 'findNearbyJSON')).toContainEqual(['maxRows', '51']);
+    },
+  );
 
   it('nearbyLimit 0 skips the nearby lookup', async () => {
     const fetchFake = serve();
@@ -403,7 +477,7 @@ describe('the upstream sequence', () => {
       ['lat', '48.8566'],
       ['lng', '2.3522'],
       ['radius', '50'],
-      ['maxRows', '3'],
+      ['maxRows', '4'],
       ['cities', 'cities15000'],
     ]);
   });
@@ -425,7 +499,7 @@ describe('the upstream sequence', () => {
       ['lat', '48.8566'],
       ['lng', '2.3522'],
       ['radius', '8'],
-      ['maxRows', '7'],
+      ['maxRows', '8'],
       ['featureClass', 'T'],
       ['featureClass', 'H'],
       ['featureCode', 'MT'],
@@ -434,15 +508,22 @@ describe('the upstream sequence', () => {
     ]);
   });
 
-  it('includeTimezone adds timezoneJSON with the point', async () => {
-    const fetchFake = serve();
-    await run({ ...PARIS, includeTimezone: true });
-    expect(endpoints(fetchFake)).toContain('timezoneJSON');
-    expect(sentTo(fetchFake, 'timezoneJSON')).toEqual([
-      ['lat', '48.8566'],
-      ['lng', '2.3522'],
-    ]);
-  });
+  it.each([
+    ['2026-10-18T11:50:00Z', '2026-10-17'],
+    ['2026-10-18T11:51:00Z', '2026-10-19'],
+  ])(
+    'includeTimezone adds timezoneJSON with the point and, at %s, the date %s',
+    async (iso, date) => {
+      const fetchFake = serve({}, { now: clockAt(iso) });
+      await run({ ...PARIS, includeTimezone: true });
+      expect(endpoints(fetchFake)).toContain('timezoneJSON');
+      expect(sentTo(fetchFake, 'timezoneJSON')).toEqual([
+        ['lat', '48.8566'],
+        ['lng', '2.3522'],
+        ['date', date],
+      ]);
+    },
+  );
 
   it('asks for the ocean only after containment finds no country, and sends the point', async () => {
     const mapped = serve();
@@ -717,12 +798,111 @@ describe('rows', () => {
     },
   );
 
+  it('derives the offsets from the zone when GeoNames sends no gmtOffset or dstOffset, on both surfaces', async () => {
+    const { gmtOffset: _gmt, dstOffset: _dst, ...sydney } = TIMEZONE_SYDNEY_BODY;
+    serve({ timezone: () => jsonResponse(sydney) });
+    const result = await run({
+      lat: -33.8688,
+      lng: 151.2093,
+      includeTimezone: true,
+      nearbyLimit: 0,
+    });
+    expect(page(result).timezone).toMatchObject({
+      timezoneId: 'Australia/Sydney',
+      rawOffsetInHours: 10,
+      gmtOffsetInHours: 11,
+      dstOffsetInHours: 10,
+    });
+    expect(textOf(result)).toContain(
+      '- **UTC offsets (hours):** standard 10, 1 January 11, 1 July 10\n',
+    );
+  });
+
+  it('reports UTC-10 for both dates in the open Pacific when GeoNames sends no gmtOffset or dstOffset', async () => {
+    serveOffshore({ timezone: () => jsonResponse({ lat: 0, lng: -150, rawOffset: -10 }) });
+    const result = await run({ lat: 0, lng: -150, includeTimezone: true, nearbyLimit: 0 });
+    expect(page(result).timezone).toEqual({
+      rawOffsetInHours: -10,
+      gmtOffsetInHours: -10,
+      dstOffsetInHours: -10,
+    });
+    expect(textOf(result)).toContain(
+      '- **UTC offsets (hours):** standard -10, 1 January -10, 1 July -10\n',
+    );
+  });
+
+  it('sends the date that covers the local day and returns its sunrise and sunset, on both surfaces', async () => {
+    const fetchFake = serve(
+      { timezone: () => jsonResponse(TIMEZONE_TONGA_DATED_BODY) },
+      { now: clockAt('2026-10-18T07:50:52Z') },
+    );
+    const result = await run({
+      lat: -21.1394,
+      lng: -175.2018,
+      includeTimezone: true,
+      nearbyLimit: 0,
+    });
+    expect(sentTo(fetchFake, 'timezoneJSON')).toContainEqual(['date', '2026-10-17']);
+    expect(endpoints(fetchFake).filter((name) => name === 'timezoneJSON')).toHaveLength(1);
+    expect(page(result).timezone).toMatchObject({
+      localTime: '2026-10-18 20:50',
+      sunrise: '2026-10-18 06:07',
+      sunset: '2026-10-18 18:44',
+    });
+    const rendered = textOf(result);
+    expect(rendered).toContain('- **Local time:** 2026-10-18 20:50\n');
+    expect(rendered).toContain('- **Sunrise:** 2026-10-18 06:07\n');
+    expect(rendered).toMatch(/^- \*\*Sunset:\*\* 2026-10-18 18:44$/m);
+  });
+
+  it('keeps the default sunrise and sunset when they fall on the local date', async () => {
+    serve({ timezone: () => jsonResponse(TIMEZONE_AUCKLAND_DATED_BODY) });
+    const result = await run({
+      lat: -36.8485,
+      lng: 174.7633,
+      includeTimezone: true,
+      nearbyLimit: 0,
+    });
+    expect(page(result).timezone).toMatchObject({
+      sunrise: '2026-10-18 06:33',
+      sunset: '2026-10-18 19:39',
+    });
+    expect(textOf(result)).toContain('- **Sunrise:** 2026-10-18 06:33\n');
+  });
+
+  it.each([
+    ['in polar night', TIMEZONE_POLAR_DATED_BODY],
+    [
+      'when neither pair is on the local date',
+      { ...TIMEZONE_TONGA_DATED_BODY, time: '2026-10-20 08:00' },
+    ],
+  ])('returns no sunrise or sunset %s, rendered Not available', async (_label, body) => {
+    serve({ timezone: () => jsonResponse(body) });
+    const result = await run({ ...PARIS, includeTimezone: true, nearbyLimit: 0 });
+    const timezone = page(result).timezone;
+    expect(timezone).toHaveProperty('localTime');
+    expect(timezone).not.toHaveProperty('sunrise');
+    expect(timezone).not.toHaveProperty('sunset');
+    expect(textOf(result)).toMatch(
+      /^- \*\*Sunrise:\*\* Not available\n- \*\*Sunset:\*\* Not available$/m,
+    );
+  });
+
   it('describes the 1 July offset as the standard offset when no timezoneId comes with it', () => {
     const timezone = reverseGeocodeTool.output.shape.timezone.unwrap().shape;
     expect(timezone.dstOffsetInHours.description).toBe(
-      "UTC offset in hours on 1 July. Without a timezoneId the offsets are GeoNames' open-water estimate, which has no DST, so this equals rawOffsetInHours.",
+      "UTC offset in hours on 1 July of the current local year. Without a timezoneId the offsets are GeoNames' open-water estimate, which has no DST, so both equal rawOffsetInHours.",
     );
-    expect(timezone.gmtOffsetInHours.description).toBe('UTC offset in hours on 1 January.');
+    expect(timezone.gmtOffsetInHours.description).toBe(
+      'UTC offset in hours on 1 January of the current local year.',
+    );
+  });
+
+  it('names the geonames_search_places filter each admin code feeds, and that level 5 has none', () => {
+    const { code } = reverseGeocodeTool.output.shape.adminLevels.element.shape;
+    expect(code.description).toBe(
+      "GeoNames admin code at this level. At levels 1 to 4, pass it as written to geonames_search_places as that level's adminCode (adminCode1 to adminCode4), with the level 1 code as adminCode1 and country.countryCode in countries, to search inside the division; level 5 has no search filter.",
+    );
   });
 });
 
@@ -747,17 +927,25 @@ describe('notices', () => {
     expectInOrder(result.notice, ['no country or ocean', 'polar or unmapped', 'boundingBox']);
   });
 
-  it('keeps hostile ocean text inline and markdown-inert in the notice', async () => {
-    serveOffshore({
-      ocean: () =>
-        jsonResponse({ ocean: { name: 'Sea [x](http://e.test)\r\n## Heading <b>', geonameId: 1 } }),
-    });
-    const result = page(await run({ ...SEA, nearbyLimit: 0 }));
-    expectInOrder(result.notice, [
-      'it lies in Sea \\[x\\](http\\[:\\]//e.test)  ## Heading &lt;b&gt;',
+  it('keeps hostile ocean text raw in structuredContent and inline, markdown-inert in the notice trailer', async () => {
+    const hostile = 'Sea [x](http://e.test)\r\n## Heading <b>';
+    serveOffshore({ ocean: () => jsonResponse({ ocean: { name: hostile, geonameId: 1 } }) });
+    const result = await run({ ...SEA, nearbyLimit: 0 });
+    const notice = (ocean: string) =>
+      `No country contains this point; it lies in ${ocean}. A harbor or shoreline point just outside a country's outline resolves to the water body: set coastalBufferKm (up to 50) to match the nearest country within that distance.`;
+    expect(page(result).ocean?.name).toBe(hostile);
+    expect(page(result).notice).toBe(notice(hostile));
+    const text = allText(result);
+    expect(text.slice(text.lastIndexOf('\n'))).toBe(
+      `\n> ${notice('Sea \\[x\\](http\\[:\\]//e.test)  ## Heading &lt;b&gt;')}`,
+    );
+    expect(headingLines(text)).toEqual([
+      '## GeoNames reverse geocode of 30, -40',
+      '### Admin divisions',
+      '### Nearby lookup skipped (nearbyLimit 0) (nearbyKind none)',
     ]);
-    expect(result.notice).not.toMatch(/[\r\n]/);
-    expect(result.ocean?.name).toBe('Sea [x](http://e.test)\r\n## Heading <b>');
+    expect(text.split('\n').filter((line) => line.startsWith('>'))).toHaveLength(1);
+    expect(text).not.toContain('<b>');
   });
 
   it('says no populated place was found, naming the radius', async () => {
@@ -797,29 +985,119 @@ describe('notices', () => {
     expect(result.notice).not.toContain(' or of class');
   });
 
-  it('warns when nearby is full at nearbyLimit, with the contract wording', async () => {
-    serve({ places: () => jsonResponse(nearbyPlacesBody(3)) });
+  it('says more lie within the radius when a row past nearbyLimit comes back, with the contract wording', async () => {
+    serve({ places: nearest(4) });
     const result = page(await run({ ...PARIS, nearbyLimit: 3, radiusKm: 12.5 }));
     expect(result).toMatchObject({ truncated: true, shown: 3, cap: 3 });
-    expectInOrder(result.notice, [
-      'Only the nearest 3',
-      'within 12.5 km',
-      'raise nearbyLimit (max 50)',
-    ]);
+    expect(result.nearby.map((row) => row.geonameId)).toEqual(nearestIds(3));
+    expect(result.notice).toBe(
+      'Only the nearest 3 are listed, and more lie within 12.5 km; raise nearbyLimit (max 50) to see them.',
+    );
   });
 
+  it('truncates the features leg the same way', async () => {
+    serve({ features: nearest(3) });
+    const result = page(await run({ ...PARIS, featureCodes: 'MT', nearbyLimit: 2 }));
+    expect(result).toMatchObject({ nearbyKind: 'features', truncated: true, shown: 2, cap: 2 });
+    expect(result.nearby.map((row) => row.geonameId)).toEqual(nearestIds(2));
+    expect(result.notice).toBe(
+      'Only the nearest 2 are listed, and more lie within 20 km; raise nearbyLimit (max 50) to see them.',
+    );
+  });
+
+  it.each([
+    ['populated places', {}, 'places'],
+    ['features', { featureCodes: 'MT' }, 'features'],
+  ] as const)(
+    'stays quiet at exactly nearbyLimit %s with no further upstream row',
+    async (_label, filter, route) => {
+      serve({ [route]: nearest(3) });
+      const result = page(await run({ ...PARIS, ...filter, nearbyLimit: 3 }));
+      expect(result).toMatchObject({ truncated: false, shown: 3, cap: 3 });
+      expect(result.nearby.map((row) => row.geonameId)).toEqual(nearestIds(3));
+      expect(result).not.toHaveProperty('notice');
+    },
+  );
+
   it('at nearbyLimit 50 there is no raise clause: it is the most one call returns', async () => {
-    serve({ places: () => jsonResponse(nearbyPlacesBody(50)) });
+    serve({ places: nearest(51) });
     const result = page(await run({ ...PARIS, nearbyLimit: 50 }));
     expect(result).toMatchObject({ truncated: true, shown: 50, cap: 50 });
-    expectInOrder(result.notice, [
-      'Only the nearest 50',
-      'the most one call returns',
-      'within 20 km',
-      'geonames_search_places',
-      'boundingBox',
-    ]);
-    expect(result.notice).not.toContain('raise nearbyLimit');
+    expect(result.nearby).toHaveLength(50);
+    expect(result.notice).toBe(
+      'Only the nearest 50 are listed, the most one call returns, and more lie within 20 km; list the rest with geonames_search_places and a boundingBox.',
+    );
+  });
+
+  it('at nearbyLimit 50 with exactly 50 nearby, stays quiet', async () => {
+    serve({ places: nearest(50) });
+    const result = page(await run({ ...PARIS, nearbyLimit: 50 }));
+    expect(result).toMatchObject({ truncated: false, shown: 50, cap: 50 });
+    expect(result).not.toHaveProperty('notice');
+  });
+
+  describe('a nearbyLimit above the 50 cap', () => {
+    const CLAMP = (requested: number) =>
+      `nearbyLimit ${requested} was capped at 50, the most this tool returns per call.`;
+    const ROUTE = (radiusKm: number) =>
+      `Only the nearest 50 are listed, and more lie within ${radiusKm} km; list the rest with geonames_search_places and a boundingBox.`;
+
+    it.each([51, 80, 1000])(
+      'names the clamp of nearbyLimit %i ahead of the routing continuation on a full page',
+      async (nearbyLimit) => {
+        const fetchFake = serve({ places: nearest(60) });
+        const result = await run({ ...PARIS, nearbyLimit });
+        const notice = `${CLAMP(nearbyLimit)} ${ROUTE(20)}`;
+        expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual(['maxRows', '51']);
+        expect(page(result)).toMatchObject({ truncated: true, shown: 50, cap: 50, notice });
+        expect(page(result).nearby.map((row) => row.geonameId)).toEqual(nearestIds(50));
+        const text = allText(result);
+        expect(text.split('\n')).toContain('**cap:** 50');
+        expect(text.slice(text.lastIndexOf('\n'))).toBe(`\n> ${notice}`);
+      },
+    );
+
+    it('names the clamp on a full features page the same way', async () => {
+      serve({ features: nearest(51) });
+      const result = page(
+        await run({ ...PARIS, featureCodes: 'MT', nearbyLimit: 80, radiusKm: 7.5 }),
+      );
+      expect(result).toMatchObject({ nearbyKind: 'features', truncated: true, shown: 50, cap: 50 });
+      expect(result.notice).toBe(`${CLAMP(80)} ${ROUTE(7.5)}`);
+    });
+
+    it.each([50, 12])(
+      'says nothing of the clamp when every nearby row fits (%i within the radius)',
+      async (total) => {
+        serve({ places: nearest(total) });
+        const result = await run({ ...PARIS, nearbyLimit: 80 });
+        expect(page(result)).toMatchObject({ truncated: false, shown: total, cap: 50 });
+        expect(page(result)).not.toHaveProperty('notice');
+        expect(allText(result).split('\n')).toContain('**cap:** 50');
+      },
+    );
+
+    it('says nothing of the clamp on a zero-nearby page', async () => {
+      serve({ places: () => jsonResponse(EMPTY_GEONAMES_BODY) });
+      const result = await run({ ...PARIS, nearbyLimit: 80 });
+      expect(page(result)).toMatchObject({ nearby: [], truncated: false, shown: 0, cap: 50 });
+      expect(page(result).notice).toBe(
+        'No populated place within 20 km; raise radiusKm (max 300).',
+      );
+      expect(allText(result).split('\n')).toContain('**cap:** 50');
+    });
+
+    it('joins the clamp after the place fragment, ahead of the continuation and the timezone', async () => {
+      serveOffshore({ places: nearest(51) });
+      const result = page(await run({ ...SEA, nearbyLimit: 80, includeTimezone: true }));
+      expectInOrder(result.notice, [
+        'No country contains this point',
+        'North Atlantic Ocean',
+        CLAMP(80),
+        ROUTE(20),
+        'No IANA timezone covers this point',
+      ]);
+    });
   });
 
   it.each([
@@ -844,9 +1122,15 @@ describe('notices', () => {
     },
   );
 
-  it('treats a single row at nearbyLimit 1 as full', async () => {
-    serve({ places: () => jsonResponse(nearbyPlacesBody(1)) });
-    expect(page(await run({ ...PARIS, nearbyLimit: 1 })).truncated).toBe(true);
+  it('treats a single row at nearbyLimit 1 as complete, and as full only when a second row comes back', async () => {
+    serve({ places: nearest(1) });
+    const alone = page(await run({ ...PARIS, nearbyLimit: 1 }));
+    expect(alone).toMatchObject({ truncated: false, shown: 1, cap: 1 });
+    expect(alone).not.toHaveProperty('notice');
+    serve({ places: nearest(2) });
+    const followed = page(await run({ ...PARIS, nearbyLimit: 1 }));
+    expect(followed).toMatchObject({ truncated: true, shown: 1, cap: 1 });
+    expect(followed.nearby.map((row) => row.geonameId)).toEqual(nearestIds(1));
   });
 
   it('stays quiet one row short of nearbyLimit', async () => {
@@ -899,7 +1183,7 @@ describe('notices', () => {
     serve({
       subdivision: noContainment,
       ocean: () => jsonResponse(OCEAN_BODY),
-      places: () => jsonResponse(nearbyPlacesBody(2)),
+      places: nearest(3),
     });
     const result = page(await run({ ...SEA, nearbyLimit: 2 }));
     expectInOrder(result.notice, [
@@ -926,7 +1210,7 @@ describe('coastal buffer', () => {
       ...routes,
     });
 
-  it.each([-0.1, -1, 50.01, 51, 'wide', null, true])(
+  it.each([-0.1, -1, 50.01, 51, 'wide', true])(
     'rejects coastalBufferKm %j before any request',
     async (coastalBufferKm) => {
       const fetchFake = serve();
@@ -953,7 +1237,7 @@ describe('coastal buffer', () => {
         ['radius', radius],
       ]);
       expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual(['radius', '20']);
-      expect(sentTo(fetchFake, 'timezoneJSON')).toEqual([
+      expect(sentTo(fetchFake, 'timezoneJSON').filter(([name]) => name !== 'date')).toEqual([
         ['lat', '48.8566'],
         ['lng', '2.3522'],
       ]);
@@ -965,6 +1249,7 @@ describe('coastal buffer', () => {
     ['0', { coastalBufferKm: 0 }],
     ['blank', { coastalBufferKm: '' }],
     ['whitespace', { coastalBufferKm: '  ' }],
+    ['null', { coastalBufferKm: null }],
   ])(
     'sends no radius when coastalBufferKm is %s, and shares the unbuffered cache entry',
     async (_label, extra) => {
@@ -1000,7 +1285,7 @@ describe('coastal buffer', () => {
       ['lat', '40.69'],
       ['lng', '-74.03'],
     ]);
-    expect(sentTo(fetchFake, 'timezoneJSON')).toEqual([
+    expect(sentTo(fetchFake, 'timezoneJSON').filter(([name]) => name !== 'date')).toEqual([
       ['lat', '40.69'],
       ['lng', '-74.03'],
     ]);
@@ -1032,6 +1317,25 @@ describe('coastal buffer', () => {
       '**Country:** (FR), 0.048 km away (matched within the coastal buffer)',
     );
     expectInOrder(page(result).notice, ['FR was matched 0.048 km away', 'within the 3 km']);
+  });
+
+  it('keeps a hostile buffered country name raw in structuredContent and inline, markdown-inert in the notice trailer', async () => {
+    const hostile = 'Evil\r\n> quote *bold* [x](http://e.test) <b>';
+    serve({
+      subdivision: () =>
+        jsonResponse({ ...SUBDIVISION_HUDSON_BUFFERED_BODY, countryName: hostile }),
+    });
+    const result = await run({ ...HARBOR, coastalBufferKm: 5, nearbyLimit: 0 });
+    const notice = (name: string) =>
+      `No country contains this point exactly; ${name} (US) was matched 0.134 km away, within the 5 km coastal buffer.`;
+    expect(page(result).country?.countryName).toBe(hostile);
+    expect(page(result).notice).toBe(notice(hostile));
+    const text = allText(result);
+    expect(text.slice(text.lastIndexOf('\n'))).toBe(
+      `\n> ${notice('Evil  &gt; quote \\*bold\\* \\[x\\](http\\[:\\]//e.test) &lt;b&gt;')}`,
+    );
+    expect(text.split('\n').filter((line) => line.startsWith('>'))).toHaveLength(1);
+    expect(text).not.toContain('<b>');
   });
 
   it.each([
@@ -1668,15 +1972,23 @@ describe('enrichment on the production output path', () => {
     expect(result.structuredContent).toMatchObject({ truncated: false, shown: 2, cap: 50 });
   });
 
-  it('writes the fields on a full page', async () => {
-    serve({ places: () => jsonResponse(nearbyPlacesBody(2)) });
+  it('writes the fields on a truncated page, in structuredContent and the content[] trailer', async () => {
+    serve({ places: nearest(3) });
     const result = await run({ ...PARIS, nearbyLimit: 2 });
-    expect(result.structuredContent).toMatchObject({
-      truncated: true,
-      shown: 2,
-      cap: 2,
-      notice: expect.stringContaining('Only the nearest 2 are listed'),
-    });
+    const notice =
+      'Only the nearest 2 are listed, and more lie within 20 km; raise nearbyLimit (max 50) to see them.';
+    expect(result.structuredContent).toMatchObject({ truncated: true, shown: 2, cap: 2, notice });
+    const lines = allText(result).split('\n');
+    expect(lines).toContain('**truncated:** true');
+    expect(lines).toContain(`> ${notice}`);
+  });
+
+  it('writes the neutral fields on an exactly full page', async () => {
+    serve({ places: nearest(2) });
+    const result = await run({ ...PARIS, nearbyLimit: 2 });
+    expect(result.structuredContent).toMatchObject({ truncated: false, shown: 2, cap: 2 });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(allText(result).split('\n')).toContain('**truncated:** false');
   });
 });
 
@@ -1834,9 +2146,9 @@ describe('format()', () => {
           ...TIMEZONE_PARIS_BODY,
           timezoneId: `Europe/Paris\n## Injected ${bidi}`,
           countryCode: 'F\nR',
-          time: '2026\n09',
-          sunrise: '[s](http://e.test)',
-          sunset: '<s>',
+          time: '2026-09-30\n09',
+          sunrise: '2026-09-30 [s](http://e.test)',
+          sunset: '2026-09-30 <s>',
         }),
     });
     const result = await run({ ...PARIS, includeTimezone: true });
@@ -1853,6 +2165,8 @@ describe('format()', () => {
     expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
+    expect(data.timezone?.sunset).toBe('2026-09-30 <s>');
+    expect(rendered).toContain('- **Sunrise:** 2026-09-30 \\[s\\](http\\[:\\]//e.test)\n');
     expect(rendered).not.toContain('<s>');
     expect(rendered).not.toContain(bidi);
     expect(rendered).not.toContain('\r');

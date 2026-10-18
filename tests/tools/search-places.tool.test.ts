@@ -1,8 +1,10 @@
 /**
  * @fileoverview geonames_search_places: input normalization and blank-as-unset, the
- * request each match mode and filter sends, row mapping, paging and the 5,000-row cap,
- * every notice, the tool's declared error contracts, the required enrichment on the
- * zero-result and under-cap pages, and format() parity with structuredContent.
+ * request each match mode and filter sends, row mapping, paging and the 5,000-row cap, a
+ * limit held to the 100 cap, rows outside the listed countries, every notice (raw in
+ * structuredContent, escaped in the trailer), the tool's declared error contracts, the
+ * required enrichment on the zero-result, under-cap, and clamped pages, and format()
+ * parity with structuredContent.
  * @module tests/tools/search-places.tool.test
  */
 
@@ -24,6 +26,7 @@ import {
   jsonResponse,
   PORTLAND_ROW,
   SEARCH_BODY,
+  SEARCH_DOUGLAS_GB_BODY,
   SEARCH_SPARSE_BODY,
   SEARCH_UNDER_CAP_BODY,
   SEATTLE_ROW,
@@ -87,6 +90,17 @@ const DEFAULT_PAGING: [string, string][] = [
   ['maxRows', '10'],
   ['startRow', '0'],
 ];
+
+/** `length` rows with ids 1 to `length`: the first built from `first`, the rest Seattle-shaped. */
+const placeRows = (length: number, first: Record<string, unknown> = SEATTLE_ROW) =>
+  Array.from({ length }, (_, index) => ({
+    ...(index === 0 ? first : SEATTLE_ROW),
+    geonameId: index + 1,
+  }));
+
+/** The notice fragment for a limit held to the 100 cap. */
+const CLAMP = (requested: number) =>
+  `limit ${requested} was capped at 100, the most this tool returns per call.`;
 
 afterEach(() => {
   getGeoNamesService().dispose();
@@ -317,13 +331,17 @@ describe('input normalization', () => {
     expect(requestedUrls(fetchFake).at(-1)?.searchParams.has('cities')).toBe(false);
   });
 
-  it('sends orderby=population only, and takes relevance as the upstream default', async () => {
+  it('sends orderby for relevance and population, and nothing when orderBy is omitted or blank', async () => {
     const fetchFake = serve();
     await run({ query: 'x', orderBy: 'population' });
     await run({ query: 'y', orderBy: 'relevance' });
     await run({ query: 'z', orderBy: '' });
+    await run({ query: 'w', orderBy: '  ' });
+    await run({ query: 'v' });
     expect(requestedUrls(fetchFake).map((url) => url.searchParams.get('orderby'))).toEqual([
       'population',
+      'relevance',
+      null,
       null,
       null,
     ]);
@@ -338,16 +356,87 @@ describe('input normalization', () => {
     expect(requestedUrls(fetchFake)[0]?.searchParams.get('orderby')).toBe('population');
   });
 
-  it('says every word enum is case-insensitive', () => {
-    const { match, orderBy, cities } = searchPlacesTool.input.shape;
-    for (const field of [match, orderBy, cities]) {
-      expect(field.description).toContain('Case-insensitive.');
+  it.each(['Relevance', 'RELEVANCE'])('sends orderBy %j as orderby=relevance', async (orderBy) => {
+    const fetchFake = serve();
+    successOf<Page>(await run({ query: 'x', orderBy }));
+    expect(requestedUrls(fetchFake)[0]?.searchParams.getAll('orderby')).toEqual(['relevance']);
+  });
+
+  it('sends explicit relevance with a name_prefix search, which GeoNames orders differently', async () => {
+    const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+    const page = successOf<Page>(
+      await run({
+        query: 'San',
+        match: 'name_prefix',
+        countries: ['US'],
+        orderBy: 'relevance',
+        limit: 5,
+      }),
+    );
+    expect(sent(fetchFake)).toEqual([
+      ['name_startsWith', 'San'],
+      ['country', 'US'],
+      ['orderby', 'relevance'],
+      ['maxRows', '5'],
+      ['startRow', '0'],
+    ]);
+    expect(page.effectiveQuery).toBe('name_prefix "San" · countries US · orderBy relevance');
+  });
+
+  it('echoes orderBy in effectiveQuery exactly when it sends orderby', async () => {
+    for (const orderBy of ['relevance', 'population', '', undefined]) {
+      const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+      const page = successOf<Page>(
+        await run({
+          query: 'San',
+          match: 'name_prefix',
+          ...(orderBy === undefined ? {} : { orderBy }),
+        }),
+      );
+      const sentOrder = requestedUrls(fetchFake)[0]?.searchParams.get('orderby');
+      expect(page.effectiveQuery, `orderBy ${orderBy}`).toBe(
+        sentOrder ? `name_prefix "San" · orderBy ${sentOrder}` : 'name_prefix "San"',
+      );
+      expect(sentOrder ?? undefined, `orderBy ${orderBy}`).toBe(orderBy || undefined);
     }
   });
 
-  it.each([[0], [101], [-5], [2.5], ['many']])('rejects limit %j', async (limit) => {
-    expect(errorOf(await run({ query: 'x', limit })).code).toBe(JsonRpcErrorCode.InvalidParams);
+  it('keeps an explicit-relevance search and an unordered one in separate cache entries', async () => {
+    const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+    const unordered = { query: 'San', match: 'name_prefix', countries: ['US'], limit: 5 };
+    const relevance = { ...unordered, orderBy: 'relevance' };
+    successOf<Page>(await run(unordered));
+    successOf<Page>(await run(relevance));
+    expect(fetchFake).toHaveBeenCalledTimes(2);
+    successOf<Page>(await run(unordered));
+    successOf<Page>(await run(relevance));
+    expect(fetchFake).toHaveBeenCalledTimes(2);
   });
+
+  it("says an omitted orderBy takes GeoNames' own order, which differs from relevance under name_prefix", () => {
+    const { description } = searchPlacesTool.input.shape.orderBy;
+    expect(description).not.toContain("relevance (GeoNames' default)");
+    expectInOrder(description, ['relevance', 'population', 'Omit', 'name_prefix']);
+  });
+
+  it('names every word enum value as the advertised enum spells it, offering no other casing', () => {
+    const { match, orderBy, cities } = searchPlacesTool.input.shape;
+    expectInOrder(match.description, ['name_required', 'any_field', 'exact_name', 'name_prefix']);
+    expectInOrder(orderBy.description, ['relevance', 'population']);
+    expectInOrder(cities.description, ['(cities1000)', '(cities5000)', '(cities15000)']);
+    for (const field of [match, orderBy, cities]) {
+      expect(field.description).not.toMatch(/case-insensitive/i);
+    }
+  });
+
+  it.each([[0], [1001], [-5], [2.5], ['many'], [true]])(
+    'rejects limit %j before any request',
+    async (limit) => {
+      const fetchFake = serve();
+      expect(errorOf(await run({ query: 'x', limit })).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([[-1], [5001], [0.5], ['next']])('rejects offset %j', async (offset) => {
     expect(errorOf(await run({ query: 'x', offset })).code).toBe(JsonRpcErrorCode.InvalidParams);
@@ -518,6 +607,16 @@ describe('alpha-3 and numeric country codes', () => {
     ]);
   });
 
+  it.each<[string | string[]]>([[['FL']], ['fl'], ['FL']])(
+    'sends FL, which GeoNames answers as Liechtenstein, as country=LI from %j',
+    async (countries) => {
+      const fetchFake = serve();
+      const result = await run({ countries, featureCodes: ['PPLC'] });
+      expect(countryParams(fetchFake)).toEqual([['country', 'LI']]);
+      expect(successOf<Page>(result).effectiveQuery).toBe('countries LI · featureCodes PPLC');
+    },
+  );
+
   it('names the mapped alpha-2 codes in the zero-hit notice', async () => {
     serve(EMPTY_GEONAMES_BODY);
     const result = await run({ query: 'Atlantis', countries: 'DEU' });
@@ -535,6 +634,8 @@ describe('alpha-3 and numeric country codes', () => {
     ['ZZZ', ['ZZZ'], 'No country has the code ZZZ.'],
     ['999', ['999'], 'No country has the code 999.'],
     [['us', 'zzz', 'DEU', '999'], ['ZZZ', '999'], 'No country has the codes ZZZ, 999.'],
+    [['US', 'EL'], ['EL'], 'No country has the code EL.'],
+    [['el', 'gr', 'xx'], ['EL', 'XX'], 'No country has the codes EL, XX.'],
   ])('fails %j as unknown_country_code before any request', async (countries, unknown, opening) => {
     const fetchFake = serve();
     const result = await run({ query: 'Berlin', countries });
@@ -548,6 +649,55 @@ describe('alpha-3 and numeric country codes', () => {
     expect(allText(result)).toContain(`Recovery: ${RECOVERY}`);
     expect(allText(result)).toContain('reason unknown_country_code');
     expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it.each(['EL', 'XX', 'EU', 'FX', 'TP', 'ZR', 'SU'])(
+    'fails the alpha-2 code %s beside a known one, in any case, before any request',
+    async (code) => {
+      const fetchFake = serve();
+      for (const written of [code, code.toLowerCase()]) {
+        const error = errorOf(await run({ query: 'Athens', countries: ['US', written] }));
+        expect(error.data).toMatchObject({ reason: 'unknown_country_code', countries: [code] });
+      }
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('sends the retired CS, under which GeoNames files Czechoslovakia, as country=CS', async () => {
+    const fetchFake = serve();
+    const result = await run({ countries: ['CS'], featureCodes: ['PCLH'] });
+    expect(successOf<Page>(result).effectiveQuery).toBe('countries CS · featureCodes PCLH');
+    expect(countryParams(fetchFake)).toEqual([['country', 'CS']]);
+    expect(sent(fetchFake).filter(([name]) => name === 'featureCode')).toEqual([
+      ['featureCode', 'PCLH'],
+    ]);
+  });
+
+  it.each([
+    [
+      ['US', 'YU'],
+      ['US', 'YU'],
+    ],
+    [
+      ['us', 'an'],
+      ['US', 'AN'],
+    ],
+  ])('accepts the retired code in %j and sends it upstream', async (countries, expected) => {
+    const fetchFake = serve();
+    successOf<Page>(await run({ query: 'Athens', countries }));
+    expect(countryParams(fetchFake)).toEqual(expected.map((code) => ['country', code]));
+  });
+
+  it('still sends UK as GB, and gr, GRC, and 300 as GR', async () => {
+    const fetchFake = serve();
+    await run({ query: 'Athens', countries: 'UK, uk, gr, GRC, 300' });
+    expect(countryParams(fetchFake)).toEqual([
+      ['country', 'GB'],
+      ['country', 'GB'],
+      ['country', 'GR'],
+      ['country', 'GR'],
+      ['country', 'GR'],
+    ]);
   });
 
   it('declares the recovery that points to geonames_get_countries', () => {
@@ -575,6 +725,7 @@ describe('alpha-3 and numeric country codes', () => {
   it('checks country codes before it resolves an account', async () => {
     installService({}, { server: false });
     expect(errorOf(await run({ countries: 'ZZZ' })).data?.reason).toBe('unknown_country_code');
+    expect(errorOf(await run({ countries: 'EL' })).data?.reason).toBe('unknown_country_code');
     expect(errorOf(await run({ countries: 'DEU' })).data?.reason).toBe('username_required');
   });
 
@@ -878,6 +1029,306 @@ describe('feature filters, which GeoNames intersects', () => {
   });
 });
 
+describe('administrative codes', () => {
+  const ADMIN_NAMES = ['adminCode1', 'adminCode2', 'adminCode3', 'adminCode4'] as const;
+  const RECOVERY =
+    'Call geonames_search_places again with exactly one country in countries and, beside adminCode2 to adminCode4, the adminCode1 they belong to; geonames_get_place lists the codes of every level in adminLevels.';
+  const adminParams = (params: [string, string][]) =>
+    params.filter(([name]) => name.startsWith('adminCode'));
+
+  it('lists Texas airports: one country, adminCode1, and a feature code', async () => {
+    const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+    const result = await run({ countries: ['US'], adminCode1: 'TX', featureCodes: ['AIRP'] });
+    expect(sent(fetchFake)).toEqual([
+      ['country', 'US'],
+      ['adminCode1', 'TX'],
+      ['featureCode', 'AIRP'],
+      ...DEFAULT_PAGING,
+    ]);
+    expect(successOf<Page>(result).effectiveQuery).toBe(
+      'countries US · adminCode1 TX · featureCodes AIRP',
+    );
+    expect(allText(result).split('\n')).toContain(
+      '**effectiveQuery:** countries US · adminCode1 TX · featureCodes AIRP',
+    );
+  });
+
+  it.each([
+    ['tx', 'TX'],
+    ['  tx ', 'TX'],
+    ['Tx', 'TX'],
+    ['02', '02'],
+    ['033', '033'],
+    ['00', '00'],
+    ['aB9', 'AB9'],
+    ['a'.repeat(20), 'A'.repeat(20)],
+  ])(
+    'sends adminCode1 %j as %j: trimmed, upper-cased, zero padding kept',
+    async (code, expected) => {
+      const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+      successOf<Page>(await run({ countries: 'MC', adminCode1: code }));
+      expect(adminParams(sent(fetchFake))).toEqual([['adminCode1', expected]]);
+    },
+  );
+
+  it.each([
+    ['Seattle', 'US', ['WA', '033', '7174408']],
+    ['Munich', 'DE', ['02', '091', '09162', '09162000']],
+    ['Boulogne-Billancourt', 'FR', ['11', '92', '923', '92012']],
+  ] as const)(
+    'sends the codes geonames_get_place returns for %s unchanged',
+    async (_place, country, codes) => {
+      const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+      const input = Object.fromEntries(codes.map((code, i) => [ADMIN_NAMES[i], code]));
+      const page = successOf<Page>(await run({ countries: country, ...input }));
+      expect(adminParams(sent(fetchFake))).toEqual(codes.map((code, i) => [ADMIN_NAMES[i], code]));
+      expect(page.effectiveQuery).toBe(
+        [`countries ${country}`, ...codes.map((code, i) => `${ADMIN_NAMES[i]} ${code}`)].join(
+          ' · ',
+        ),
+      );
+    },
+  );
+
+  it.each(ADMIN_NAMES)('rejects a malformed %s at the schema, before any request', async (name) => {
+    const fetchFake = serve();
+    for (const code of ['T X', 'TX!', 'a'.repeat(21), 'ſ', 'é', 'US-TX', true, { code: 'TX' }]) {
+      const error = errorOf(
+        await run({ query: 'x', countries: 'US', adminCode1: 'WA', [name]: code }),
+      );
+      expect(error.code, `${name} ${JSON.stringify(code)}`).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data?.issues).toEqual([expect.objectContaining({ path: [name] })]);
+    }
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '   '])('reads a blank admin code (%j) exactly as an absent one', async (blank) => {
+    const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+    const blanks = Object.fromEntries(ADMIN_NAMES.map((name) => [name, blank]));
+    const page = successOf<Page>(await run({ query: 'x', countries: 'US,GB', ...blanks }));
+    expect(page.effectiveQuery).toBe('name_required "x" · countries US,GB');
+    expect(adminParams(sent(fetchFake))).toEqual([]);
+    expect(errorOf(await run(blanks)).data?.reason).toBe('query_or_filter_required');
+    expect(errorOf(await run(blanks)).message).not.toContain('admin');
+    const missingParent = errorOf(
+      await run({ countries: 'US', adminCode1: blank, adminCode2: '033' }),
+    );
+    expect(missingParent.data).toMatchObject({
+      reason: 'admin_code_unscoped',
+      missing: ['adminCode1'],
+    });
+  });
+
+  it.each([
+    [
+      { query: 'x', adminCode1: 'TX' },
+      ['countries'],
+      'adminCode1 TX needs exactly one country in countries, since admin codes repeat across countries; countries has none.',
+    ],
+    [
+      { query: 'x', countries: ['US', 'GB'], adminCode1: 'tx' },
+      ['countries'],
+      'adminCode1 TX needs exactly one country in countries, since admin codes repeat across countries; countries has US, GB.',
+    ],
+    [
+      { countries: 'US', adminCode2: '033' },
+      ['adminCode1'],
+      'adminCode2 033 needs adminCode1, since lower-level codes repeat across first-level divisions.',
+    ],
+    [
+      { countries: 'FR', adminCode3: '923', adminCode4: '92012' },
+      ['adminCode1'],
+      'adminCode3 923 and adminCode4 92012 need adminCode1, since lower-level codes repeat across first-level divisions.',
+    ],
+    [
+      { query: 'x', adminCode2: '033', adminCode3: '7174408' },
+      ['adminCode1', 'countries'],
+      'adminCode2 033 and adminCode3 7174408 need adminCode1 and exactly one country in countries, since admin codes repeat across countries and lower-level codes across first-level divisions; countries has none.',
+    ],
+  ])('fails %j as admin_code_unscoped before any request', async (input, missing, message) => {
+    const fetchFake = serve();
+    const result = await run(input);
+    const error = expectDeclaredError(searchPlacesTool, result, 'admin_code_unscoped', RECOVERY);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data).toMatchObject({ missing });
+    expect(error.message).toBe(message);
+    expect(allText(result)).toContain(`Error: ${message}`);
+    expect(allText(result)).toContain(`Recovery: ${RECOVERY}`);
+    expect(allText(result)).toContain('reason admin_code_unscoped');
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it.each([[['US', 'USA']], ['us, 840']])(
+    'counts countries %j, one country written two ways, as one',
+    async (countries) => {
+      const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+      successOf<Page>(await run({ countries, adminCode1: 'TX', adminCode2: '201' }));
+      expect(adminParams(sent(fetchFake))).toEqual([
+        ['adminCode1', 'TX'],
+        ['adminCode2', '201'],
+      ]);
+    },
+  );
+
+  it('declares the recovery that names the scope and where codes come from', () => {
+    expect(declaredError(searchPlacesTool, 'admin_code_unscoped').recovery).toBe(RECOVERY);
+  });
+
+  it('runs the checks in their declared order when two of them fire', async () => {
+    const fetchFake = serve();
+    const badBox = { north: 47, south: 48, east: -122, west: -123 };
+    const reasonFor = async (input: Record<string, unknown>) =>
+      errorOf(await run(input)).data?.reason;
+    expect(await reasonFor({ adminCode1: 'TX', match: 'exact_name' })).toBe('query_required');
+    expect(await reasonFor({ adminCode1: 'TX' })).toBe('query_or_filter_required');
+    expect(await reasonFor({ query: 'x', countries: 'ZZZ', adminCode1: 'TX' })).toBe(
+      'unknown_country_code',
+    );
+    expect(await reasonFor({ query: 'x', countries: 'US,ZZZ', adminCode1: 'TX' })).toBe(
+      'unknown_country_code',
+    );
+    expect(await reasonFor({ countries: 'US', featureCodes: 'ZZZZ', adminCode2: '033' })).toBe(
+      'unknown_feature_code',
+    );
+    expect(
+      await reasonFor({
+        countries: 'US,GB',
+        adminCode1: 'TX',
+        featureClasses: 'H',
+        featureCodes: 'MT',
+      }),
+    ).toBe('admin_code_unscoped');
+    expect(await reasonFor({ countries: 'US', adminCode2: '033', boundingBox: badBox })).toBe(
+      'admin_code_unscoped',
+    );
+    expect(
+      await reasonFor({
+        countries: 'US',
+        adminCode1: 'WA',
+        featureClasses: 'H',
+        featureCodes: 'MT',
+      }),
+    ).toBe('feature_filter_mismatch');
+    expect(fetchFake).not.toHaveBeenCalled();
+  });
+
+  it('says in query_or_filter_required that an admin code needs a country too', async () => {
+    serve();
+    expect(errorOf(await run({ adminCode1: 'TX' })).message).toBe(
+      'geonames_search_places needs query or a narrowing filter (countries, featureClasses, featureCodes, boundingBox); admin codes also need exactly one country in countries.',
+    );
+    expect(errorOf(await run({ adminCode2: '033', cities: 'cities1000' })).message).toBe(
+      'geonames_search_places needs query or a narrowing filter (countries, featureClasses, featureCodes, boundingBox); cities alone does not narrow enough; admin codes also need exactly one country in countries.',
+    );
+  });
+
+  it('checks the scope before it resolves an account', async () => {
+    installService({}, { server: false });
+    expect(errorOf(await run({ query: 'x', adminCode1: 'TX' })).data?.reason).toBe(
+      'admin_code_unscoped',
+    );
+    expect(errorOf(await run({ countries: 'US', adminCode3: '7174408' })).data?.reason).toBe(
+      'admin_code_unscoped',
+    );
+    expect(errorOf(await run({ countries: 'US', adminCode1: 'TX' })).data?.reason).toBe(
+      'username_required',
+    );
+  });
+
+  it('names the codes in the zero-hit notice, after the countries fragment', async () => {
+    serve(EMPTY_GEONAMES_BODY);
+    const result = await run({
+      countries: 'US',
+      adminCode1: 'TX',
+      adminCode2: '999',
+      featureCodes: 'AIRP',
+      boundingBox: { north: 33, south: 32, east: -96, west: -97 },
+    });
+    const page = successOf<Page>(result);
+    expect(page.effectiveQuery).toBe(
+      'countries US · adminCode1 TX · adminCode2 999 · featureCodes AIRP · boundingBox north 33 south 32 east -96 west -97',
+    );
+    expect(page.notice).toBe(
+      [
+        `No GeoNames place matched ${page.effectiveQuery}.`,
+        'The feature filter may be too narrow; drop it, or check codes with geonames_list_reference topic feature_codes.',
+        'Only US were searched; check the codes with geonames_get_countries, or drop countries to search worldwide.',
+        'Only places with adminCode1 TX, adminCode2 999 were searched; admin codes match exactly, zero padding included: copy them from adminLevels of geonames_get_place, or drop the deepest to widen the search.',
+        'Only places inside the bounding box were searched; widen or drop boundingBox.',
+      ].join(' '),
+    );
+    expect(allText(result).split('\n')).toContain(`> ${page.notice}`);
+  });
+
+  it('sends a JSON integer as its digits, and the zero-hit notice names zero padding', async () => {
+    const fetchFake = serve(EMPTY_GEONAMES_BODY);
+    const page = successOf<Page>(await run({ countries: 'DE', adminCode1: 2 }));
+    expect(adminParams(sent(fetchFake))).toEqual([['adminCode1', '2']]);
+    expect(page.notice).toContain('admin codes match exactly, zero padding included');
+  });
+
+  it('adds no admin fragment to a zero-hit notice without admin codes', async () => {
+    serve(EMPTY_GEONAMES_BODY);
+    const page = successOf<Page>(await run({ countries: 'US', adminCode1: '' }));
+    expect(page.notice).not.toContain('admin');
+  });
+
+  it('advertises in tools/list a pattern that admits every form the tool accepts', async () => {
+    const { properties = {}, required = [] } = z.toJSONSchema(searchPlacesTool.input, {
+      io: 'input',
+      target: 'draft-2020-12',
+    }) as { properties?: Record<string, { pattern?: string; type?: string }>; required?: string[] };
+    const accepted = ['tx', '  tx ', 'TX', '02', '00', '09162000', 'a'.repeat(20)];
+    const rejected = ['T X', 'TX!', 'a'.repeat(21), 'ſ', 'é', 'US-TX'];
+    for (const name of ADMIN_NAMES) {
+      expect(required).not.toContain(name);
+      expect(properties[name]).toMatchObject({
+        type: 'string',
+        pattern: '^\\s*[A-Za-z0-9]{1,20}\\s*$',
+      });
+      const advertised = new RegExp(properties[name]?.pattern ?? '');
+      for (const code of accepted) expect(advertised.test(code), `${name} ${code}`).toBe(true);
+      for (const code of rejected) expect(advertised.test(code), `${name} ${code}`).toBe(false);
+    }
+    serve(SEARCH_UNDER_CAP_BODY);
+    for (const code of accepted) {
+      successOf<Page>(await run({ countries: 'US', adminCode1: code }));
+    }
+    for (const code of rejected) {
+      expect(errorOf(await run({ countries: 'US', adminCode1: code })).code).toBe(
+        JsonRpcErrorCode.InvalidParams,
+      );
+    }
+  });
+
+  it('says where each code comes from, and that ISO 3166-2 and postal codes differ', () => {
+    const shape = searchPlacesTool.input.shape;
+    expectInOrder(shape.adminCode1.description, [
+      'geonames_get_place',
+      'geonames_reverse_geocode',
+      'adminLevels',
+      'geonames_get_hierarchy',
+      'ISO 3166-2',
+      'postal',
+      '02, not BY',
+      'exactly one country',
+      'Case-insensitive',
+    ]);
+    for (const name of ['adminCode2', 'adminCode3', 'adminCode4'] as const) {
+      const { description } = shape[name];
+      expectInOrder(description, ['geonames_get_place', 'geonames_reverse_geocode', 'adminLevels']);
+      expect(description).toContain('adminCode1');
+      expect(description).toContain('Case-insensitive');
+      expect(description).not.toContain('geonames_get_hierarchy');
+      expect(description).not.toContain('geonames_get_children');
+      expect(description).not.toContain('geonames_search_places');
+    }
+    expect(searchPlacesTool.description).toContain(
+      'admin division by its GeoNames code (adminCode1 TX with countries US for Texas)',
+    );
+  });
+});
+
 describe('results', () => {
   it('maps the rows: numbers parsed, labels trimmed, placeholders dropped, extras stripped', async () => {
     serve();
@@ -1113,6 +1564,164 @@ describe('paging', () => {
   });
 });
 
+describe('a limit above the 100 cap', () => {
+  const maxRows = (fetchFake: ReturnType<typeof serve>) =>
+    sent(fetchFake).filter(([name]) => name === 'maxRows');
+
+  it.each([101, 200, 1000])(
+    'sends limit %i as maxRows 100, returns cap 100, and names the clamp before the next offset',
+    async (limit) => {
+      const fetchFake = serve({ totalResultsCount: 542, geonames: placeRows(100) });
+      const result = await run({ query: 'x', limit });
+      expect(maxRows(fetchFake)).toEqual([['maxRows', '100']]);
+      expect(successOf<Page>(result)).toMatchObject({
+        cap: 100,
+        shown: 100,
+        truncated: true,
+        nextOffset: 100,
+        notice: `${CLAMP(limit)} 442 more places; call again with offset 100.`,
+      });
+      expect(allText(result).split('\n')).toContain(
+        `> ${CLAMP(limit)} 442 more places; call again with offset 100.`,
+      );
+    },
+  );
+
+  it('applies limit 100 as given, with no clamp fragment', async () => {
+    const fetchFake = serve({ totalResultsCount: 542, geonames: placeRows(100) });
+    const result = successOf<Page>(await run({ query: 'x', limit: 100 }));
+    expect(maxRows(fetchFake)).toEqual([['maxRows', '100']]);
+    expect(result).toMatchObject({ cap: 100, truncated: true });
+    expect(result.notice).toBe('442 more places; call again with offset 100.');
+  });
+
+  it('names the clamp before the offset-5000 continuation and before the paging cap', async () => {
+    serve({ totalResultsCount: 9000, geonames: placeRows(100) });
+    const overlapping = successOf<Page>(await run({ query: 'x', limit: 200, offset: 4950 }));
+    expect(overlapping).toMatchObject({ cap: 100, nextOffset: 5000 });
+    expect(overlapping.notice).toBe(
+      `${CLAMP(200)} 3,950 more places; call again with offset 5000, the last offset GeoNames' free service accepts (its first 50 rows repeat this page).`,
+    );
+    const last = successOf<Page>(await run({ query: 'x', limit: 200, offset: 5000 }));
+    expect(last).not.toHaveProperty('nextOffset');
+    expect(last.notice).toBe(
+      `${CLAMP(200)} GeoNames' free service accepts no offset past 5,000, so no later page is reachable; narrow with countries, featureCodes, or boundingBox to reach the rest.`,
+    );
+  });
+
+  it('says nothing of the clamp when every row fits', async () => {
+    const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+    const result = successOf<Page>(await run({ query: 'x', limit: 200 }));
+    expect(maxRows(fetchFake)).toEqual([['maxRows', '100']]);
+    expect(result).toMatchObject({ cap: 100, shown: 2, truncated: false });
+    expect(result.notice).toBeUndefined();
+  });
+
+  it('says nothing of the clamp on a zero-hit or past-the-end page', async () => {
+    serve(EMPTY_GEONAMES_BODY);
+    const none = successOf<Page>(await run({ query: 'Atlantis', match: 'any_field', limit: 500 }));
+    expect(none).toMatchObject({ cap: 100, shown: 0 });
+    expect(none.notice).toBe('No GeoNames place matched any_field "Atlantis".');
+    serve({ totalResultsCount: 542, geonames: [] });
+    const past = successOf<Page>(await run({ query: 'x', limit: 500, offset: 600 }));
+    expect(past).toMatchObject({ cap: 100, shown: 0 });
+    expect(past.notice).toBe(
+      'offset 600 is past the last result (542); call again with a smaller offset.',
+    );
+  });
+});
+
+describe('places outside the listed countries', () => {
+  const OUTSIDE = (codes: string) =>
+    `This page also holds places in ${codes}, which countries does not list: GeoNames returns the territories it files under a listed country, and each place's countryCode names its own country.`;
+  const IM_ROW = SEARCH_DOUGLAS_GB_BODY.geonames[0] as Record<string, unknown>;
+  const douglas = (countries?: unknown) =>
+    run({
+      query: 'Douglas',
+      match: 'exact_name',
+      ...(countries === undefined ? {} : { countries }),
+    });
+
+  it('relays every row as GeoNames returned it, territories included', async () => {
+    serve(SEARCH_DOUGLAS_GB_BODY);
+    const result = successOf<Page>(await douglas(['GB']));
+    expect(result.places.map(({ geonameId, countryCode }) => [geonameId, countryCode])).toEqual([
+      [3042237, 'IM'],
+      [9782170, 'IM'],
+      [2651073, 'GB'],
+      [2651072, 'GB'],
+    ]);
+    expect(result).toMatchObject({ totalCount: 4, shown: 4, truncated: false });
+  });
+
+  it.each([['GB'], ['uk'], [['gbr']], [['826']]])(
+    'names IM, outside countries %j, in the notice of both surfaces',
+    async (countries) => {
+      serve(SEARCH_DOUGLAS_GB_BODY);
+      const result = await douglas(countries);
+      expect(successOf<Page>(result).notice).toBe(OUTSIDE('IM'));
+      expect(allText(result).split('\n')).toContain(`> ${OUTSIDE('IM')}`);
+    },
+  );
+
+  it.each([[['GB', 'IM']], ['uk, IMN'], [['826', '833']]])(
+    'adds nothing when countries %j lists every code on the page',
+    async (countries) => {
+      serve(SEARCH_DOUGLAS_GB_BODY);
+      const result = successOf<Page>(await douglas(countries));
+      expect(result.places).toHaveLength(4);
+      expect(result.notice).toBeUndefined();
+    },
+  );
+
+  it('adds nothing to a search without countries', async () => {
+    serve(SEARCH_DOUGLAS_GB_BODY);
+    const result = successOf<Page>(await douglas());
+    expect(result.places).toHaveLength(4);
+    expect(result.notice).toBeUndefined();
+  });
+
+  it('names each outside code once, in the order the page holds them', async () => {
+    const row = (countryCode: string, geonameId: number) => ({
+      ...SEATTLE_ROW,
+      geonameId,
+      countryCode,
+    });
+    serve({
+      totalResultsCount: 5,
+      geonames: [row('IM', 1), row('JE', 2), row('GB', 3), row('IM', 4), row('GG', 5)],
+    });
+    const result = successOf<Page>(await run({ countries: 'GB' }));
+    expect(result.notice).toBe(OUTSIDE('IM, JE, and GG'));
+  });
+
+  it('skips a row that carries no countryCode', async () => {
+    serve(SEARCH_SPARSE_BODY);
+    const result = successOf<Page>(await run({ query: 'Hong Kong', countries: 'CN' }));
+    expect(result.places[0]).not.toHaveProperty('countryCode');
+    expect(result.notice).toBeUndefined();
+  });
+
+  it('joins the paging fragment and itself in one notice, itself last', async () => {
+    serve({ totalResultsCount: 542, geonames: [IM_ROW, SEARCH_DOUGLAS_GB_BODY.geonames[2]] });
+    const result = await run({ query: 'x', countries: 'GB', limit: 2 });
+    const notice = `540 more places; call again with offset 2. ${OUTSIDE('IM')}`;
+    expect(successOf<Page>(result)).toMatchObject({ truncated: true, notice });
+    expect(allText(result).split('\n')).toContain(`> ${notice}`);
+  });
+
+  it('joins the clamp, paging, and its own fragment in one notice, its own last', async () => {
+    serve({ totalResultsCount: 542, geonames: placeRows(100, IM_ROW) });
+    const result = await run({ query: 'x', countries: ['US', 'GB'], limit: 200 });
+    const notice = `${CLAMP(200)} 442 more places; call again with offset 100. ${OUTSIDE('IM')}`;
+    expect(successOf<Page>(result)).toMatchObject({ cap: 100, truncated: true, notice });
+    const quoted = allText(result)
+      .split('\n')
+      .filter((line) => line.startsWith('>'));
+    expect(quoted).toEqual([`> ${notice}`]);
+  });
+});
+
 describe('zero-result notices', () => {
   const NO_MATCH = (effective: string) => `No GeoNames place matched ${effective}.`;
   const NAME_REQUIRED =
@@ -1122,7 +1731,7 @@ describe('zero-result notices', () => {
   const FEATURE =
     'The feature filter may be too narrow; drop it, or check codes with geonames_list_reference topic feature_codes.';
   const COUNTRIES = (codes: string) =>
-    `Only ${codes} were searched, and a code GeoNames does not know matches nothing; check the codes with geonames_get_countries, or drop countries to search worldwide.`;
+    `Only ${codes} were searched; check the codes with geonames_get_countries, or drop countries to search worldwide.`;
   const BOX = 'Only places inside the bounding box were searched; widen or drop boundingBox.';
   const CITIES = (tier: string) =>
     `${tier} excludes smaller populated places; drop cities to include them.`;
@@ -1190,14 +1799,37 @@ describe('zero-result notices', () => {
     expect(result.notice).toContain(NAME_REQUIRED);
   });
 
-  it('flattens and escapes a hostile query in the notice and effectiveQuery', async () => {
+  it('keeps a hostile query as sent in structuredContent, flattened and escaped in the trailer', async () => {
     const hostile = 'evil\r\n## Heading [x](http://e.test) <b>';
-    const result = await empty({ query: hostile, match: 'exact_name' });
+    serve(EMPTY_GEONAMES_BODY);
+    const result = await run({ query: hostile, match: 'exact_name' });
+    const exact = (query: string) =>
+      `No place is named exactly "${query}"; retry with match name_prefix or name_required.`;
+    expect(successOf<Page>(result)).toMatchObject({
+      effectiveQuery: `exact_name "${hostile}"`,
+      notice: `${NO_MATCH(`exact_name "${hostile}"`)} ${exact(hostile)}`,
+    });
     const echoed = 'evil  ## Heading \\[x\\](http\\[:\\]//e.test) &lt;b&gt;';
-    expect(result.effectiveQuery).toBe(`exact_name "${echoed}"`);
-    expect(result.notice).toContain(`No place is named exactly "${echoed}"`);
-    expect(result.notice).not.toMatch(/[\r\n]/);
-    expect(result.effectiveQuery).not.toMatch(/[\r\n]/);
+    const text = allText(result);
+    expect(text).toContain(`\n**effectiveQuery:** exact_name "${echoed}"\n`);
+    expect(text.slice(text.lastIndexOf('\n'))).toBe(
+      `\n> ${NO_MATCH(`exact_name "${echoed}"`)} ${exact(echoed)}`,
+    );
+  });
+
+  it('carries markup in the query raw in structuredContent and inert in content[]', async () => {
+    serve(EMPTY_GEONAMES_BODY);
+    const result = await run({ query: '[Paris] <b>', match: 'any_field', limit: 1 });
+    expect(successOf<Page>(result)).toMatchObject({
+      effectiveQuery: 'any_field "[Paris] <b>"',
+      notice: 'No GeoNames place matched any_field "[Paris] <b>".',
+    });
+    const text = allText(result);
+    expect(text).toContain('\n**effectiveQuery:** any_field "\\[Paris\\] &lt;b&gt;"\n');
+    expect(text.slice(text.lastIndexOf('\n'))).toBe(
+      '\n> No GeoNames place matched any_field "\\[Paris\\] &lt;b&gt;".',
+    );
+    expect(text).not.toContain('<b>');
   });
 });
 
@@ -1267,6 +1899,26 @@ describe('enrichment on the production output path', () => {
       shown: 2,
       effectiveQuery: 'countries US',
     });
+  });
+
+  it.each([
+    ['zero-result', EMPTY_GEONAMES_BODY, { totalCount: 0, shown: 0, truncated: false }],
+    ['under-cap', SEARCH_UNDER_CAP_BODY, { totalCount: 2, shown: 2, truncated: false }],
+    [
+      'clamped',
+      { totalResultsCount: 542, geonames: placeRows(100) },
+      { totalCount: 542, shown: 100, truncated: true },
+    ],
+  ])('writes cap 100 for limit 250 on the %s page', async (_page, body, fields) => {
+    serve(body);
+    const result = await run({ query: 'x', limit: 250 });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({
+      ...fields,
+      cap: 100,
+      effectiveQuery: 'name_required "x"',
+    });
+    expect(allText(result)).toContain('\n**cap:** 100\n');
   });
 });
 

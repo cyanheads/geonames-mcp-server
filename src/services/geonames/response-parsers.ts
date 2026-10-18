@@ -2,9 +2,11 @@
  * @fileoverview Parses GeoNames JSON bodies into domain rows. Each parser checks the
  * endpoint's root key (missing → unreadable), validates the rows with Zod (mismatch
  * → unexpected shape), then normalizes: string numbers parsed, and GeoNames'
- * absence placeholders (`population: 0`, `geonameId: 0`, `adminCode1: "00"`,
- * `isoNumeric: "0"`, empty strings, the -32768/-9999 DEM sentinels) dropped. The
- * offshore timezone's `dstOffset: 0` placeholder takes `rawOffset` instead.
+ * absence placeholders (`population: 0`, `geonameId: 0`, `adminCode1: "00"` with no
+ * admin id, `isoNumeric: "0"`, empty strings, the -32768/-9999 DEM sentinels) dropped. A
+ * country record lists no admin level. Timezone offsets on 1 January and 1 July come from
+ * the IANA zone in the local year; offshore, both are `rawOffset`. Sunrise and sunset
+ * are the pair on the local date.
  * @module services/geonames/response-parsers
  */
 
@@ -78,10 +80,14 @@ const isoNumeric = (value: unknown): string | undefined => {
   return code !== undefined && Number(code) === 0 ? undefined : code;
 };
 
-/** Admin codes, with the `"00"` that GeoNames puts on country rows dropped. */
-const adminCode = (value: unknown): string | undefined => {
-  const code = text(value);
-  return code === '00' ? undefined : code;
+/**
+ * A first-level admin code. GeoNames' `"00"` is a placeholder when no admin id comes with
+ * it, as on a country row, and dropped; with an id it is a real code (Monaco's one
+ * division, 3319178) and kept.
+ */
+const adminCode1 = (code: unknown, adminId: unknown): string | undefined => {
+  const value = text(code);
+  return value === '00' && positive(adminId) === undefined ? undefined : value;
 };
 
 function boundingBox(value: Record<string, unknown>): BoundingBox | undefined {
@@ -138,7 +144,7 @@ function toToponym(row: ToponymRow): Toponym {
     countryCode: text(row.countryCode),
     countryName: text(row.countryName),
     countryGeonameId: positive(row.countryId),
-    adminCode1: adminCode(row.adminCode1),
+    adminCode1: adminCode1(row.adminCode1, row.adminId1),
     adminName1: text(row.adminName1),
     iso3166_2: text(isoCodes.ISO3166_2),
     population: positive(row.population),
@@ -199,12 +205,59 @@ const isIdentifierLang = (lang: string | undefined): lang is ExternalIdentifier[
 /** GeoNames' `srtm3` / `astergdem` no-data values. */
 const DEM_NO_DATA = new Set([-32768, -9999]);
 
+/** The `YYYY-MM-DD` a GeoNames local timestamp (`YYYY-MM-DD HH:mm`) opens with. */
+const localDate = (value: string | undefined): string | undefined =>
+  value === undefined ? undefined : /^\d{4}-\d{2}-\d{2}/.exec(value)?.[0];
+
+/** A zone's UTC offsets in hours on 1 January and 1 July. */
+interface DatedOffsets {
+  january: number;
+  july: number;
+}
+
+/** `Intl`'s `longOffset` zone name: `GMT`, `GMT+05:45`, with seconds for a historical offset. */
+const LONG_OFFSET = /^GMT(?:([+-])(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+
+function offsetHours(format: Intl.DateTimeFormat, instant: number): number {
+  const name = format.formatToParts(instant).find((part) => part.type === 'timeZoneName')?.value;
+  const match = LONG_OFFSET.exec(name ?? '');
+  if (!match) throw new Error(`The runtime named a UTC offset in an unknown form: ${name}`);
+  const [, sign, hours = '0', minutes = '0', seconds = '0'] = match;
+  const value = Number(hours) + Number(minutes) / 60 + Number(seconds) / 3600;
+  return sign === '-' ? -value : value;
+}
+
+/**
+ * The offsets of `timezoneId` at noon UTC on 1 January and 1 July of `localTime`'s year,
+ * from the runtime's tz data (Design Decision 50). `undefined` when `localTime` carries no
+ * date or the runtime has no such zone, so the caller falls back to GeoNames' own pair.
+ */
+function zoneOffsets(timezoneId: string, localTime: string | undefined): DatedOffsets | undefined {
+  const date = localDate(localTime);
+  if (date === undefined) return;
+  let format: Intl.DateTimeFormat;
+  try {
+    format = new Intl.DateTimeFormat('en-US', { timeZone: timezoneId, timeZoneName: 'longOffset' });
+  } catch (error) {
+    if (error instanceof RangeError) return;
+    throw error;
+  }
+  const year = Number(date.slice(0, 4));
+  return {
+    january: offsetHours(format, Date.UTC(year, 0, 1, 12)),
+    july: offsetHours(format, Date.UTC(year, 6, 1, 12)),
+  };
+}
+
+/** `getJSON`'s timezone block; GeoNames' pair, each optional, stands in where no zone resolves. */
 function placeTimezone(value: unknown): PlaceTimezone | undefined {
   if (!isRecord(value)) return;
+  const timezoneId = text(value.timeZoneId);
+  const derived = timezoneId === undefined ? undefined : zoneOffsets(timezoneId, text(value.time));
   const timezone = prune<PlaceTimezone>({
-    timezoneId: text(value.timeZoneId),
-    gmtOffsetInHours: toNumber(value.gmtOffset),
-    dstOffsetInHours: toNumber(value.dstOffset),
+    timezoneId,
+    gmtOffsetInHours: derived?.january ?? toNumber(value.gmtOffset),
+    dstOffsetInHours: derived?.july ?? toNumber(value.dstOffset),
   });
   return Object.keys(timezone).length > 0 ? timezone : undefined;
 }
@@ -212,7 +265,8 @@ function placeTimezone(value: unknown): PlaceTimezone | undefined {
 function placeAdminLevels(row: Record<string, unknown>): AdminLevel[] {
   const levels: AdminLevel[] = [];
   for (let level = 1; level <= 5; level++) {
-    const code = level === 1 ? adminCode(row.adminCode1) : text(row[`adminCode${level}`]);
+    const code =
+      level === 1 ? adminCode1(row.adminCode1, row.adminId1) : text(row[`adminCode${level}`]);
     const name = text(row[`adminName${level}`]);
     if (code === undefined && name === undefined) continue;
     levels.push(
@@ -247,6 +301,11 @@ export function parsePlace(body: Body): PlaceRecord {
   }
   const base = toToponym(row);
   const dem = toNumber(row.srtm3);
+  /**
+   * A record whose `countryId` is its own id is the country, and every division lies
+   * below it, though GeoNames sends Monaco's with its one division as ADM1.
+   */
+  const isCountry = base.countryGeonameId === base.geonameId;
   return prune<PlaceRecord>({
     geonameId: base.geonameId,
     name: base.name,
@@ -263,7 +322,7 @@ export function parsePlace(body: Body): PlaceRecord {
     countryGeonameId: base.countryGeonameId,
     continentCode: text(row.continentCode),
     iso3166_2: base.iso3166_2,
-    adminLevels: placeAdminLevels(row),
+    adminLevels: isCountry ? [] : placeAdminLevels(row),
     population: base.population,
     elevationInMeters: toNumber(row.elevation),
     demElevationInMeters: dem !== undefined && !DEM_NO_DATA.has(dem) ? dem : undefined,
@@ -338,28 +397,59 @@ export function parseOcean(body: Body): Ocean {
 
 const TimezoneSchema = z.looseObject({
   rawOffset: z.number(),
-  gmtOffset: z.number(),
-  dstOffset: z.number(),
+  gmtOffset: z.number().optional(),
+  dstOffset: z.number().optional(),
 });
 
+/** GeoNames' own `gmtOffset`/`dstOffset` pair, when it sends both. */
+const sentOffsets = (january?: number, july?: number): DatedOffsets | undefined =>
+  january === undefined || july === undefined ? undefined : { january, july };
+
 /**
- * `timezoneJSON`; offshore answers carry only the three offsets. Without a `timezoneId`,
- * `dstOffset: 0` is a placeholder (open water has no DST), so 1 July takes `rawOffset`.
+ * The sunrise and sunset on the local date `today` (Design Decision 51): GeoNames' default
+ * pair or the `dates[0]` pair the request's `date` asked for, whichever has its sunrise
+ * (else its sunset) on that date. Neither offshore, in polar day or night, or when no
+ * pair falls on it.
+ */
+function solarEvents(
+  row: Record<string, unknown>,
+  today: string | undefined,
+): Pruned<Pick<TimezoneInfo, 'sunrise' | 'sunset'>> {
+  if (today === undefined) return {};
+  const requested = Array.isArray(row.dates) ? row.dates[0] : undefined;
+  for (const pair of [row, requested]) {
+    if (!isRecord(pair)) continue;
+    const sunrise = text(pair.sunrise);
+    const sunset = text(pair.sunset);
+    if (localDate(sunrise ?? sunset) === today) return { sunrise, sunset };
+  }
+  return {};
+}
+
+/**
+ * `timezoneJSON`; offshore answers carry only the offsets. With a `timezoneId`, the 1
+ * January and 1 July offsets come from the zone (Design Decision 50), and GeoNames'
+ * `gmtOffset`/`dstOffset`, which it no longer documents, stand in only when the zone or
+ * the local year cannot be read. Offshore, open water has no DST, so both are `rawOffset`.
  */
 export function parseTimezone(body: Body): TimezoneInfo {
   const row = validate(body, 'rawOffset', TimezoneSchema, 'timezoneJSON');
   const timezoneId = text(row.timezoneId);
+  const localTime = text(row.time);
+  const offsets =
+    timezoneId === undefined
+      ? { january: row.rawOffset, july: row.rawOffset }
+      : (zoneOffsets(timezoneId, localTime) ?? sentOffsets(row.gmtOffset, row.dstOffset));
+  if (offsets === undefined) throw upstreamUnexpectedShape('timezoneJSON');
   return prune<TimezoneInfo>({
     timezoneId,
     countryCode: text(row.countryCode),
     countryName: text(row.countryName),
     rawOffsetInHours: row.rawOffset,
-    gmtOffsetInHours: row.gmtOffset,
-    dstOffsetInHours:
-      timezoneId === undefined && row.dstOffset === 0 ? row.rawOffset : row.dstOffset,
-    localTime: text(row.time),
-    sunrise: text(row.sunrise),
-    sunset: text(row.sunset),
+    gmtOffsetInHours: offsets.january,
+    dstOffsetInHours: offsets.july,
+    localTime,
+    ...solarEvents(row, localDate(localTime)),
   });
 }
 

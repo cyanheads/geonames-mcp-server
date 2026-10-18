@@ -82,6 +82,7 @@ const CASES: ToolCase[] = [
       'query_required',
       'unknown_country_code',
       'unknown_feature_code',
+      'admin_code_unscoped',
       'feature_filter_mismatch',
       'invalid_bounding_box',
     ],

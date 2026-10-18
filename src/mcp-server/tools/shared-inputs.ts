@@ -3,13 +3,14 @@
  * Normalizations run in the schema, before validation: blanks from form clients
  * become unset, lists accept a comma-separated string, codes are upper-cased (country
  * codes mapped to alpha-2), and word enums are lower-cased. Also the checks tools run
- * before any request: country codes no country has, and feature filters that intersect
- * to nothing.
+ * before any request: country codes GeoNames files no feature under, feature filters
+ * that intersect to nothing, and the clamp that holds a limit to the tool's cap; and, once
+ * a page is back, the notice fragment naming the territories a country filter also returned.
  * @module mcp-server/tools/shared-inputs
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { alpha2For } from '@/services/geonames/country-codes.js';
+import { alpha2For, isFiledCountryCode } from '@/services/geonames/country-codes.js';
 import {
   FEATURE_CLASS_CODES,
   type FeatureClass,
@@ -48,7 +49,8 @@ export interface ListInputOptions {
 
 /**
  * An optional list that also accepts a comma-separated string. Items are trimmed and
- * normalized, blanks dropped, and an empty list is unset.
+ * normalized, blanks dropped, and an empty list is unset. The advertised schema is the array
+ * alone, so a description offers only the list; the joined string is tolerated.
  */
 export function listInput<T extends z.ZodType>(item: T, { max, normalize }: ListInputOptions) {
   return z.preprocess((value: unknown) => {
@@ -62,7 +64,10 @@ export function listInput<T extends z.ZodType>(item: T, { max, normalize }: List
   }, z.array(item).max(max).optional());
 }
 
-/** Lower-cases a string before `schema` validates it, so a word enum accepts any case (`Tourism`). */
+/**
+ * Lower-cases a string before `schema` validates it, so a word enum accepts any case (`Tourism`).
+ * The advertised enum lists only the lower-case members, so the description offers only those.
+ */
 export const lowerCased = <T extends z.ZodType>(schema: T) =>
   z.preprocess(
     (value: unknown) => (typeof value === 'string' ? value.toLowerCase() : value),
@@ -70,13 +75,20 @@ export const lowerCased = <T extends z.ZodType>(schema: T) =>
   );
 
 /**
+ * The two codes outside ISO 3166-1 alpha-2 that GeoNames' search answers as a country:
+ * `UK` (ISO's exceptionally reserved code for the United Kingdom) and `FL` (Liechtenstein's
+ * international vehicle code).
+ */
+const COUNTRY_ALIASES: Readonly<Record<string, string>> = { UK: 'GB', FL: 'LI' };
+
+/**
  * Upper-cases a country code and maps it to the alpha-2 GeoNames keys countries by: `UK`
- * (ISO's exceptionally reserved code for the United Kingdom) to `GB`, and an alpha-3 or
- * three-digit numeric code to its country's alpha-2. A code no country has stays, upper-cased.
+ * to `GB` and `FL` to `LI` (see {@link COUNTRY_ALIASES}), and an alpha-3 or three-digit
+ * numeric code to its country's alpha-2. A code no country has stays, upper-cased.
  */
 export const toAlpha2 = (item: string) => {
   const code = item.toUpperCase();
-  return code === 'UK' ? 'GB' : (alpha2For(code) ?? code);
+  return COUNTRY_ALIASES[code] ?? alpha2For(code) ?? code;
 };
 
 /** Optional caller GeoNames account; never logged, cached, or echoed. */
@@ -95,10 +107,11 @@ export const USERNAME_ALIASES = { username: 'geonamesUsername' } as const;
 /**
  * Argument names `setup()` registers with `sanitization.setSensitiveFields`, so the
  * failed-call payload record redacts a username sent under a near-miss key. The framework
- * matches a key by its lower-cased alphanumerics and by its camelCase, snake_case, or
- * kebab-case words: `user` and `account` cover `geonames_user` and `GeoNamesAccount`, and
- * the run-together names cover all-caps keys such as `GEONAMES_USER`, which split into
- * single letters.
+ * splits a key into lower-cased words at separators, camelCase boundaries, the end of a run
+ * of capitals, and around digits, and matches every run of adjacent words, joined:
+ * `user` and `account` cover `geonames_user`, `GEONAMES_USER`, and `GeoNamesAccount`, and
+ * the run-together names cover a key written as one word, such as `geonamesuser` or
+ * `GEONAMESUSER`, which the word split leaves whole.
  */
 export const USERNAME_LOG_FIELDS = [
   'geonamesUsername',
@@ -118,6 +131,8 @@ const MAX_GEONAME_ID = 2_147_483_647;
 /**
  * Required GeoNames feature id, as a digit string of at most {@link MAX_GEONAME_ID}. A
  * JSON integer becomes its digit string here, so an out-of-range one gets the range message.
+ * The advertised pattern admits only the digit string, so the description offers only that;
+ * the URL and integer forms are tolerated.
  */
 export const geonameIdInput = z
   .preprocess(
@@ -129,19 +144,24 @@ export const geonameIdInput = z
           : value,
     z
       .string()
-      .regex(/^[1-9]\d*$/, { error: 'Must be a positive integer such as 5809844.', abort: true })
+      .regex(/^[1-9]\d*$/, {
+        error: 'Must be a digit string with no leading zero, such as "5809844".',
+        abort: true,
+      })
       .refine((id) => Number(id) <= MAX_GEONAME_ID, {
         error: `Must be at most ${MAX_GEONAME_ID}, the largest geonameId GeoNames accepts.`,
       }),
   )
   .describe(
-    `GeoNames feature id, a positive integer up to ${MAX_GEONAME_ID} such as 5809844 (Seattle), as returned in geonameId by the other geonames tools. A geonames.org/<id> URL is reduced to its id.`,
+    `GeoNames feature id as a digit string up to ${MAX_GEONAME_ID}, such as "5809844" (Seattle): the geonameId the other geonames tools return, sent as a string.`,
   );
 
 /**
  * Optional country filter, up to 10 codes, each mapped to alpha-2 by {@link toAlpha2}. A
- * well-formed alpha-3 or numeric code no country has passes the schema for the tool to
- * reject; see {@link unknownCountryCodes}.
+ * well-formed code GeoNames files no feature under passes the schema for the tool to
+ * reject before any request; see {@link unknownCountryCodes}. GeoNames' `country` filter
+ * also returns the territories it files under a listed country, and the tools relay those
+ * rows as returned, so the description says so.
  */
 export const countriesInput = listInput(
   z
@@ -150,10 +170,10 @@ export const countriesInput = listInput(
     .describe('ISO 3166-1 alpha-2, alpha-3, or three-digit numeric country code.'),
   { max: 10, normalize: toAlpha2 },
 ).describe(
-  'ISO 3166-1 country codes, up to 10, as a list or a comma-separated string: alpha-2 (US, GB, DE), alpha-3 (USA, GBR, DEU), or three-digit numeric (840, 826, 276), each sent to GeoNames as alpha-2. Case-insensitive; UK is accepted for GB.',
+  'ISO 3166-1 country codes, up to 10, as a list: alpha-2 (US, GB, DE), alpha-3 (USA, GBR, DEU), or three-digit numeric (840, 826, 276), each sent to GeoNames as alpha-2. UK is accepted for GB and FL for LI. A listed country also returns the territories GeoNames files under it (GB also returns IM, JE, and GG), each result naming its own country in countryCode.',
 );
 
-/** `countries` entries no country has, and the message naming them. */
+/** `countries` entries GeoNames files no feature under, and the message naming them. */
 export interface UnknownCountryCodes {
   /** Each entry as normalized, in input order. */
   countries: string[];
@@ -161,14 +181,15 @@ export interface UnknownCountryCodes {
 }
 
 /**
- * The `countries` entries {@link toAlpha2} could not map: well-formed alpha-3 or numeric
- * codes no country has. Returns `undefined` when every entry is alpha-2; an alpha-2 code
- * GeoNames does not know still goes upstream and matches nothing.
+ * The `countries` entries GeoNames files no feature under: after {@link toAlpha2}, each
+ * entry outside the 250 country codes and the retired `AN`, `CS`, and `YU`, whether an
+ * alpha-2 such as `EL` or an alpha-3 or numeric code the table could not map. Returns
+ * `undefined` when every entry is one of those codes.
  */
 export function unknownCountryCodes(
   countries: readonly string[] | undefined,
 ): UnknownCountryCodes | undefined {
-  const unknown = [...new Set(countries?.filter((code) => code.length !== 2))];
+  const unknown = [...new Set(countries?.filter((code) => !isFiledCountryCode(code)))];
   if (unknown.length === 0) return;
   return {
     countries: unknown,
@@ -176,12 +197,39 @@ export function unknownCountryCodes(
   };
 }
 
+const LIST = new Intl.ListFormat('en', { type: 'conjunction' });
+
+/**
+ * The notice fragment naming the countries on a page that `countries` (as the schema
+ * normalized it, alpha-2) does not list: the territories GeoNames' `country` filter returns
+ * under a listed country, relayed rather than dropped. Each code appears once, in page
+ * order, read from the page's own rows, so no parent-to-territory table is needed; a row
+ * with no `countryCode` is skipped. `noun` names one row of the page. Returns `undefined`
+ * without `countries` or when every code on the page is listed.
+ */
+export function unlistedCountriesFragment(
+  countryCodes: readonly (string | undefined)[],
+  countries: readonly string[] | undefined,
+  noun: 'place' | 'postal code',
+): string | undefined {
+  if (countries === undefined) return;
+  const unlisted = [
+    ...new Set(
+      countryCodes.filter(
+        (code): code is string => code !== undefined && !countries.includes(code),
+      ),
+    ),
+  ];
+  if (unlisted.length === 0) return;
+  return `This page also holds ${noun}s in ${LIST.format(unlisted)}, which countries does not list: GeoNames returns the territories it files under a listed country, and each ${noun}'s countryCode names its own country.`;
+}
+
 /** Optional feature-class filter, up to all nine classes. */
 export const featureClassesInput = listInput(
   z.enum(FEATURE_CLASS_CODES).describe('One-letter GeoNames feature class.'),
   { max: 9, normalize: (item) => item.toUpperCase() },
 ).describe(
-  'GeoNames feature classes: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. A list or a comma-separated string; case-insensitive. With featureCodes too, the two lists intersect: list exactly the classes of those codes, or pass featureCodes alone.',
+  'GeoNames feature classes: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. With featureCodes too, the two lists intersect: list exactly the classes of those codes, or pass featureCodes alone.',
 );
 
 /** Optional feature-code filter, up to 20 codes; tools check each against the bundled table. */
@@ -192,14 +240,14 @@ export const featureCodesInput = listInput(
     .describe('GeoNames feature code without its class prefix.'),
   { max: 20, normalize: (item) => item.toUpperCase().replace(/^[A-Z]\./, '') },
 ).describe(
-  "GeoNames feature codes (PPLC capital, ADM1 state, MT mountain, AIRP airport), up to 20, as a list or a comma-separated string. Case-insensitive; a class prefix (P.PPLC) is dropped. Each code implies its class; with featureClasses too, the two lists intersect, so featureClasses must list exactly these codes' classes. geonames_list_reference topic feature_codes lists every code.",
+  "GeoNames feature codes (PPLC capital, ADM1 state, MT mountain, AIRP airport), up to 20, as a list. Each code implies its class; with featureClasses too, the two lists intersect, so featureClasses must list exactly these codes' classes. geonames_list_reference topic feature_codes lists every code.",
 );
 
 /** Optional population tier for populated places. */
 export const citiesInput = blankAsUnset(
   lowerCased(z.enum(['cities1000', 'cities5000', 'cities15000']).optional()),
 ).describe(
-  "Keep only populated places (class P) with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. Beside featureClasses or featureCodes, list only class P or class-P codes such as PPLC. Case-insensitive.",
+  "Keep only populated places (class P) with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. Beside featureClasses or featureCodes, list only class P or class-P codes such as PPLC.",
 );
 
 /** Feature-filter entries GeoNames can never match, and the message naming them. */
@@ -266,7 +314,7 @@ export function featureFilterMismatch({
   if (featureClasses !== undefined) applied.push('featureClasses');
   if (featureCodes !== undefined) applied.push('featureCodes');
   if (cities !== undefined) applied.push('cities');
-  const filters = new Intl.ListFormat('en', { type: 'conjunction' }).format(applied);
+  const filters = LIST.format(applied);
   const clauses = [...codeClauses.values(), ...classClauses.values()].join('; ');
   return {
     featureClasses: [...classClauses.keys()],
@@ -294,11 +342,41 @@ export const nameContainsInput = blankAsUnset(z.string().max(100).optional()).de
   'Keep only entries whose name contains every word of this text as a substring (kansas also matches Arkansas), ignoring case, accents, and punctuation.',
 );
 
-/** A `limit` input: 1–`max`, `fallback` when omitted or blank. */
-export const limitInput = (max: number, fallback: number) =>
-  blankAsUnset(z.number().int().min(1).max(max).default(fallback)).describe(
-    `Maximum entries to return, 1 to ${max}. Default ${fallback}.`,
+/** The largest `limit` a clamped input accepts; anything above it fails validation as absurd. */
+const LIMIT_CEILING = 1000;
+
+/**
+ * A `limit` input for a tool that returns at most `cap` entries a call: 1 to 1,000, `fallback`
+ * when omitted or blank. The handler holds a value above `cap` to `cap` with {@link clampLimit}
+ * instead of rejecting a request it can answer up to the cap.
+ */
+export const clampedLimitInput = (cap: number, fallback: number) =>
+  blankAsUnset(z.number().int().min(1).max(LIMIT_CEILING).default(fallback)).describe(
+    `Maximum entries to return, 1 to ${LIMIT_CEILING.toLocaleString('en-US')}. This tool returns at most ${cap} per call: a larger limit is held to ${cap}, and the notice says so when more entries remain. Default ${fallback}.`,
   );
+
+/** A requested limit held to a tool's cap. */
+export interface ClampedLimit {
+  /** The limit the tool applies and reports as `cap`: the request, or the cap when it asked for more. */
+  applied: number;
+  /** Names the requested value and the cap; present only when the request was above the cap. */
+  fragment?: string;
+}
+
+/**
+ * Holds `requested` to `cap`, before any request or slice. The tool writes `applied` as its
+ * `cap` enrichment, and puts `fragment` in its notice ahead of its continuation only on a page
+ * with entries remaining past it: a clamped call whose entries all fit says nothing of the
+ * clamp. `field` is the input's name as the fragment prints it.
+ */
+export function clampLimit(requested: number, cap: number, field = 'limit'): ClampedLimit {
+  return requested > cap
+    ? {
+        applied: cap,
+        fragment: `${field} ${requested} was capped at ${cap}, the most this tool returns per call.`,
+      }
+    : { applied: requested };
+}
 
 /** An `offset` input: entries to skip, 0 when omitted or blank. */
 export const offsetInput = (max?: number) =>

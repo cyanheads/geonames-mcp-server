@@ -15,7 +15,7 @@ import {
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import { type ExternalIdentifier, IDENTIFIER_TYPES } from '@/services/geonames/types.js';
-import { inlineText, plainUrl } from '@/utils/inline-text.js';
+import { blockStartText, inlineText, plainUrl } from '@/utils/inline-text.js';
 
 const IDENTIFIER_LABELS: Record<ExternalIdentifier['type'], string> = {
   iata: 'IATA',
@@ -53,7 +53,7 @@ export const getPlaceTool = tool('geonames_get_place', {
         .describe('Language tag or prefix, such as en, de, or zh-tw.'),
       { max: 20, normalize: (item) => item.toLowerCase() },
     ).describe(
-      'Keep only alternate names in these languages, up to 20, as a list or a comma-separated string. Case-insensitive; a tag also matches its regional forms (zh matches zh, zh-CN, and zh-TW). Omit to return every alternate name, including those under GeoNames pseudo-language tags (abbr, phon, piny, fr_1793), which this filter cannot select. Postal codes, links, and identifiers are unaffected.',
+      'Keep only alternate names in these languages, up to 20, as a list. A tag also matches its regional forms: zh keeps names GeoNames tags zh, zh-CN, or zh-TW. Omit to return every alternate name, including those under GeoNames pseudo-language tags (abbr, phon, piny, fr_1793), which this filter cannot select. Postal codes, links, and identifiers are unaffected.',
     ),
     geonamesUsername: geonamesUsernameInput,
   }),
@@ -113,7 +113,12 @@ export const getPlaceTool = tool('geonames_get_place', {
             z
               .object({
                 level: z.number().describe('Admin level, 1 (state, province) through 5.'),
-                code: z.string().optional().describe("The division's GeoNames admin code."),
+                code: z
+                  .string()
+                  .optional()
+                  .describe(
+                    "The division's GeoNames admin code. At levels 1 to 4, pass it as written to geonames_search_places as that level's adminCode (adminCode1 to adminCode4), with the level 1 code as adminCode1 and countryCode in countries, to search inside the division; level 5 has no search filter.",
+                  ),
                 name: z.string().optional().describe("The division's name."),
                 geonameId: z
                   .number()
@@ -138,8 +143,14 @@ export const getPlaceTool = tool('geonames_get_place', {
         timezone: z
           .object({
             timezoneId: z.string().optional().describe('IANA timezone id, such as Europe/Paris.'),
-            gmtOffsetInHours: z.number().optional().describe('UTC offset in hours on 1 January.'),
-            dstOffsetInHours: z.number().optional().describe('UTC offset in hours on 1 July.'),
+            gmtOffsetInHours: z
+              .number()
+              .optional()
+              .describe('UTC offset in hours on 1 January of the current year at the place.'),
+            dstOffsetInHours: z
+              .number()
+              .optional()
+              .describe('UTC offset in hours on 1 July of the current year at the place.'),
           })
           .optional()
           .describe('Timezone of the place. Absent when GeoNames sends none.'),
@@ -277,9 +288,9 @@ export const getPlaceTool = tool('geonames_get_place', {
     const lines: string[] = [];
     const { place } = result;
     if (place === undefined) lines.push('## GeoNames place');
-    else lines.push(`## ${inlineText(place.name)}`);
+    else lines.push(`## ${blockStartText(place.name)}`);
     lines.push('', `**Found:** ${result.found}`);
-    if (result.guidance !== undefined) lines.push('', inlineText(result.guidance));
+    if (result.guidance !== undefined) lines.push('', blockStartText(result.guidance));
     if (place !== undefined) {
       const feature = [
         place.featureCode && inlineText(place.featureCode),
@@ -344,7 +355,7 @@ export const getPlaceTool = tool('geonames_get_place', {
         `### Postal codes (${place.postalCodes.length})`,
         place.postalCodes.length === 0
           ? 'None recorded.'
-          : place.postalCodes.map(inlineText).join(', '),
+          : blockStartText(place.postalCodes.join(', ')),
       );
 
       lines.push('', `### Links (${place.links.length})`);
@@ -358,7 +369,7 @@ export const getPlaceTool = tool('geonames_get_place', {
           Boolean,
         );
         lines.push(
-          `- ${inlineText(entry.name)} — ${entry.lang === undefined ? 'untagged' : inlineText(entry.lang)}${flags.length > 0 ? ` (${flags.join(', ')})` : ''}`,
+          `- ${blockStartText(entry.name)} — ${entry.lang === undefined ? 'untagged' : inlineText(entry.lang)}${flags.length > 0 ? ` (${flags.join(', ')})` : ''}`,
         );
       }
     }

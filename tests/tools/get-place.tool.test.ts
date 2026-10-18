@@ -13,8 +13,11 @@ import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import {
   CALLER_USERNAME,
   GET_LONDON_BODY,
+  GET_MONACO_COUNTRY_BODY,
+  GET_MONTE_CARLO_BODY,
   GET_SEATTLE_BODY,
   GET_SPARSE_BODY,
+  GET_UNITED_STATES_BODY,
   jsonResponse,
   SERVER_USERNAME,
   statusEnvelope,
@@ -182,6 +185,18 @@ describe('nameLanguages input', () => {
     serve(GET_LONDON_BODY);
     expect(await langsOf('zh-cn')).toEqual(['zh-CN']);
     expect(await langsOf('zh-TW')).toEqual(['zh-TW']);
+  });
+
+  it('shows an upper-case region subtag only as the tag GeoNames puts on a name, never as an input', () => {
+    const { description = '' } = getPlaceTool.input.shape.nameLanguages;
+    expect(description).toContain(
+      'A tag also matches its regional forms: zh keeps names GeoNames tags zh, zh-CN, or zh-TW.',
+    );
+    const withRegion = description
+      .split(/(?<=\.) /)
+      .filter((sentence) => /\b[a-z]{2,3}-[A-Z]/.test(sentence));
+    expect(withRegion).toHaveLength(1);
+    for (const sentence of withRegion) expect(sentence).toMatch(/GeoNames tags [^.]*[a-z]-[A-Z]/);
   });
 
   it('does not match a longer language code that merely starts with the range', async () => {
@@ -375,6 +390,22 @@ describe('the record', () => {
     });
   });
 
+  it("keeps Monaco's first-level code 00, sent with its division's id, and drops a country's 00", async () => {
+    serve(GET_MONTE_CARLO_BODY);
+    expect(placeOf(await run({ geonameId: '2992741' })).adminLevels).toEqual([
+      { level: 1, code: '00', geonameId: 3319178 },
+    ]);
+    serve(GET_UNITED_STATES_BODY);
+    expect(placeOf(await run({ geonameId: '6252001' })).adminLevels).toEqual([]);
+  });
+
+  it("lists no admin level on Monaco's country record, which GeoNames sends with its division", async () => {
+    serve(GET_MONACO_COUNTRY_BODY);
+    const place = placeOf(await run({ geonameId: '2993457' }));
+    expect(place.adminLevels).toEqual([]);
+    expect(place).toMatchObject({ geonameId: 2993457, featureCode: 'PCLI' });
+  });
+
   it.each([-32768, -9999])('treats the DEM no-data value %i as absent', async (srtm3) => {
     serve({ ...GET_SEATTLE_BODY, srtm3 });
     expect(placeOf(await run({ geonameId: '5809844' }))).not.toHaveProperty('demElevationInMeters');
@@ -415,8 +446,19 @@ describe('the record', () => {
 
   it('describes the timezone offsets by date, not as standard and daylight time', () => {
     const timezone = getPlaceTool.output.shape.place.unwrap().shape.timezone.unwrap().shape;
-    expect(timezone.gmtOffsetInHours.description).toBe('UTC offset in hours on 1 January.');
-    expect(timezone.dstOffsetInHours.description).toBe('UTC offset in hours on 1 July.');
+    expect(timezone.gmtOffsetInHours.description).toBe(
+      'UTC offset in hours on 1 January of the current year at the place.',
+    );
+    expect(timezone.dstOffsetInHours.description).toBe(
+      'UTC offset in hours on 1 July of the current year at the place.',
+    );
+  });
+
+  it('names the geonames_search_places filter each admin code feeds, and that level 5 has none', () => {
+    const { code } = getPlaceTool.output.shape.place.unwrap().shape.adminLevels.element.shape;
+    expect(code.description).toBe(
+      "The division's GeoNames admin code. At levels 1 to 4, pass it as written to geonames_search_places as that level's adminCode (adminCode1 to adminCode4), with the level 1 code as adminCode1 and countryCode in countries, to search inside the division; level 5 has no search filter.",
+    );
   });
 
   it('keeps a partial timezone, and omits one with no usable field', async () => {
@@ -549,6 +591,24 @@ describe('format()', () => {
     expect(rendered).toContain('### Alternate names (0)\nNone returned.');
   });
 
+  it("renders Monaco's first-level division under code 00, and no division for a country's 00", async () => {
+    serve(GET_MONTE_CARLO_BODY);
+    expect(textOf(await run({ geonameId: '2992741' }))).toContain(
+      '### Admin divisions\n- ADM1: Not available (code 00, geonameId 3319178)\n',
+    );
+    serve(GET_UNITED_STATES_BODY);
+    expect(textOf(await run({ geonameId: '6252001' }))).toContain(
+      '### Admin divisions\nNone recorded.\n',
+    );
+  });
+
+  it("renders no division for Monaco's country record", async () => {
+    serve(GET_MONACO_COUNTRY_BODY);
+    const rendered = textOf(await run({ geonameId: '2993457' }));
+    expect(rendered).toContain('### Admin divisions\nNone recorded.\n');
+    expect(rendered).not.toContain('ADM1');
+  });
+
   it('renders each flag combination of an alternate name', async () => {
     serve({
       ...GET_SEATTLE_BODY,
@@ -612,6 +672,74 @@ describe('format()', () => {
     expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
     expect(rendered.split('\n').filter((line) => line.startsWith('- injected'))).toEqual([]);
     expect(allText(result)).not.toMatch(/\r/);
+  });
+
+  it('escapes markdown delimiters and a leading list marker in content[], and keeps both surfaces otherwise as received', async () => {
+    const names = ['4. Wiener Gemeindebezirk', 'Route 4. North', 'W14_01'];
+    serve({
+      ...GET_SEATTLE_BODY,
+      name: '**North** _Fork_ `Creek` ~~Old~~',
+      asciiName: 'Binyamina-Giv`at `Ada',
+      alternateNames: [
+        { name: names[0], lang: 'de' },
+        { name: names[1], lang: 'en' },
+        { name: names[2] },
+      ],
+    });
+    const result = await run({ geonameId: '5809844' });
+    const place = placeOf(result);
+    expect(place.name).toBe('**North** _Fork_ `Creek` ~~Old~~');
+    expect(place.asciiName).toBe('Binyamina-Giv`at `Ada');
+    expect(place.alternateNames.map(({ name }) => name)).toEqual(names);
+
+    const rendered = textOf(result);
+    expect(rendered.split('\n')[0]).toBe(
+      '## \\*\\*North\\*\\* \\_Fork\\_ \\`Creek\\` \\~\\~Old\\~\\~',
+    );
+    expect(rendered).toContain('\n- **ASCII name:** Binyamina-Giv\\`at \\`Ada\n');
+    const alternateLines = rendered.split('### Alternate names (3)\n')[1]?.split('\n');
+    expect(alternateLines).toEqual([
+      '- 4\\. Wiener Gemeindebezirk — de',
+      '- Route 4. North — en',
+      '- W14_01 — untagged',
+    ]);
+  });
+
+  it('escapes a line-start marker only where the text opens the line, and drops leading spaces there', async () => {
+    serve({
+      ...GET_SEATTLE_BODY,
+      name: 'Lot #',
+      toponymName: '4. Wiener Gemeindebezirk',
+      asciiName: '#####',
+      alternateNames: [
+        { name: '    four-space indent', lang: 'hu', isPreferredName: true },
+        { name: '- Dash', lang: 'en' },
+        { name: '4. 1040', lang: 'post' },
+        { name: '- 1050', lang: 'post' },
+      ],
+    });
+    const result = await run({ geonameId: '5809844' });
+    const place = placeOf(result);
+    expect(place).toMatchObject({
+      name: 'Lot #',
+      toponymName: '4. Wiener Gemeindebezirk',
+      asciiName: '#####',
+      postalCodes: ['4. 1040', '- 1050'],
+    });
+    expect(place.alternateNames.map(({ name }) => name)).toEqual([
+      '    four-space indent',
+      '- Dash',
+    ]);
+
+    const rendered = textOf(result);
+    expect(rendered.split('\n')[0]).toBe('## Lot \\#');
+    expect(rendered).toContain('\n- **Toponym name:** 4. Wiener Gemeindebezirk\n');
+    expect(rendered).toContain('\n- **ASCII name:** #####\n');
+    expect(rendered).toContain('\n### Postal codes (2)\n4\\. 1040, - 1050\n');
+    expect(rendered.split('### Alternate names (2)\n')[1]?.split('\n')).toEqual([
+      '- four-space indent — hu (preferred)',
+      '- \\- Dash — en',
+    ]);
   });
 
   describe('invisible characters and bare URLs in names', () => {

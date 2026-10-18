@@ -13,7 +13,7 @@ import {
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import type { Toponym } from '@/services/geonames/types.js';
-import { inlineText, tableCell } from '@/utils/inline-text.js';
+import { blockStartText, tableCell } from '@/utils/inline-text.js';
 
 /** A chain row as this tool returns it: the containment fields, without the labels the chain itself shows. */
 const toLink = ({
@@ -161,10 +161,10 @@ export const getHierarchyTool = tool('geonames_get_hierarchy', {
   format: (result) => {
     const lines = [`## GeoNames hierarchy of geonameId ${result.geonameId}`, ''];
     if (result.chain.length > 0) {
-      lines.push(result.chain.map((link) => inlineText(link.name)).join(' › '), '');
+      lines.push(blockStartText(result.chain.map((link) => link.name).join(' › ')), '');
     }
     lines.push(`**Found:** ${result.found}`);
-    if (result.guidance !== undefined) lines.push('', inlineText(result.guidance));
+    if (result.guidance !== undefined) lines.push('', blockStartText(result.guidance));
     if (result.chain.length > 0) {
       lines.push(
         '',

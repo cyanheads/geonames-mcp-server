@@ -21,15 +21,23 @@ import {
 import {
   COUNTRY_INFO_BODY,
   COUNTRY_KOSOVO_ROW,
+  GET_MONACO_COUNTRY_BODY,
+  GET_MONTE_CARLO_BODY,
   GET_SEATTLE_BODY,
   SEARCH_BODY,
   SEATTLE_ROW,
   SUBDIVISION_PARIS_BODY,
   TIMEZONE_ACCRA_BODY,
+  TIMEZONE_AUCKLAND_DATED_BODY,
+  TIMEZONE_LOS_ANGELES_DATED_BODY,
   TIMEZONE_OFFSHORE_BODY,
   TIMEZONE_OPEN_PACIFIC_BODY,
   TIMEZONE_PARIS_BODY,
+  TIMEZONE_POLAR_DATED_BODY,
   TIMEZONE_REYKJAVIK_BODY,
+  TIMEZONE_SYDNEY_BODY,
+  TIMEZONE_SYDNEY_DATED_BODY,
+  TIMEZONE_TONGA_DATED_BODY,
 } from '../fixtures/geonames-upstream.js';
 import {
   SUBDIVISION_HUDSON_BUFFERED_BODY,
@@ -45,6 +53,18 @@ function reasonOfThrow(run: () => unknown): { code: JsonRpcErrorCode; reason: un
     return { code: (error as McpError).code, reason: (error as McpError).data?.reason };
   }
   throw new Error('expected a throw');
+}
+
+/** A `timezoneJSON` body without the `gmtOffset`/`dstOffset` pair GeoNames no longer documents. */
+function withoutSentOffsets(body: Record<string, unknown>): Record<string, unknown> {
+  const { gmtOffset: _gmtOffset, dstOffset: _dstOffset, ...rest } = body;
+  return rest;
+}
+
+/** A `timezoneJSON` body without its local `time`. */
+function withoutLocalTime(body: Record<string, unknown>): Record<string, unknown> {
+  const { time: _time, ...rest } = body;
+  return rest;
 }
 
 describe('root key and row shape', () => {
@@ -133,6 +153,18 @@ describe('parseSearch rows', () => {
     expect(row).toEqual({ geonameId: 1, name: 'n', toponymName: 'n' });
   });
 
+  it.each([
+    ['as a digit string', '3319178'],
+    ['as a number', 3319178],
+  ])('keeps admin code 00 when an admin id comes with it, %s', (_label, adminId1) => {
+    expect(one({ adminCode1: '00', adminId1 })).toEqual({
+      geonameId: 1,
+      name: 'n',
+      toponymName: 'n',
+      adminCode1: '00',
+    });
+  });
+
   it('keeps a positive population, and a population sent as a string', () => {
     expect(one({ population: 1200 })).toHaveProperty('population', 1200);
     expect(one({ population: '1200' })).toHaveProperty('population', 1200);
@@ -215,6 +247,43 @@ describe('parsePlace', () => {
     });
   });
 
+  it.each([
+    ['2024', '2024-06-01 10:00', 6, 5],
+    ['2026', '2026-10-18 10:43', 5, 5],
+  ])(
+    "derives a place's offsets from its zone in the block's local year (%s), over the offsets sent",
+    (_year, time, january, july) => {
+      const base = { geonameId: 1526384, name: 'Almaty', toponymName: 'Almaty' };
+      const block = { timeZoneId: 'Asia/Almaty', gmtOffset: 9, dstOffset: 9, time };
+      expect(parsePlace({ ...base, timezone: block }).timezone).toEqual({
+        timezoneId: 'Asia/Almaty',
+        gmtOffsetInHours: january,
+        dstOffsetInHours: july,
+      });
+    },
+  );
+
+  it("derives a place's offsets when GeoNames sends none, and keeps them as sent when it cannot", () => {
+    const base = { geonameId: 1, name: 'n', toponymName: 'n' };
+    const sydney = { timeZoneId: 'Australia/Sydney', time: '2026-10-18 16:42' };
+    expect(parsePlace({ ...base, timezone: sydney }).timezone).toEqual({
+      timezoneId: 'Australia/Sydney',
+      gmtOffsetInHours: 11,
+      dstOffsetInHours: 10,
+    });
+    const rejected = { timeZoneId: 'Etc/Test', gmtOffset: -1, time: '2026-10-18 16:42' };
+    expect(parsePlace({ ...base, timezone: rejected }).timezone).toEqual({
+      timezoneId: 'Etc/Test',
+      gmtOffsetInHours: -1,
+    });
+    const undated = { timeZoneId: 'Australia/Sydney', gmtOffset: 9, dstOffset: 9 };
+    expect(parsePlace({ ...base, timezone: undated }).timezone).toEqual({
+      timezoneId: 'Australia/Sydney',
+      gmtOffsetInHours: 9,
+      dstOffsetInHours: 9,
+    });
+  });
+
   it('omits a bounding box with a missing side', () => {
     const base = { geonameId: 1, name: 'n', toponymName: 'n' };
     expect(parsePlace({ ...base, bbox: { north: 1, south: 0, east: 1 } })).not.toHaveProperty(
@@ -232,6 +301,58 @@ describe('parsePlace', () => {
       adminName2: '',
     });
     expect(place.adminLevels).toEqual([]);
+  });
+
+  it("keeps Monaco's real first-level code 00, which arrives with its division's id", () => {
+    expect(parsePlace(GET_MONTE_CARLO_BODY).adminLevels).toEqual([
+      { level: 1, code: '00', geonameId: 3319178 },
+    ]);
+  });
+
+  it('lists no admin level on a country record, though Monaco sends its one division as its ADM1', () => {
+    const country = parsePlace(GET_MONACO_COUNTRY_BODY);
+    expect(country.adminLevels).toEqual([]);
+    expect(country).toMatchObject({ geonameId: 2993457, countryGeonameId: 2993457 });
+  });
+
+  it.each([
+    ['countryId as a number', { countryId: 2993457 }],
+    [
+      'levels below the first',
+      { adminCode2: '01', adminName2: 'Below', adminId2: '7', adminName3: 'Lower' },
+    ],
+  ])('drops every level of a record that is its own country, with %s', (_label, extra) => {
+    expect(parsePlace({ ...GET_MONACO_COUNTRY_BODY, ...extra }).adminLevels).toEqual([]);
+  });
+
+  it('keeps the levels of a record whose countryId is another feature, the division itself included', () => {
+    const division = {
+      ...GET_MONACO_COUNTRY_BODY,
+      geonameId: 3319178,
+      fcode: 'ADM1',
+      adminCode2: '01',
+      adminId2: '7',
+    };
+    expect(parsePlace(division).adminLevels).toEqual([
+      { level: 1, code: '00', geonameId: 3319178 },
+      { level: 2, code: '01', geonameId: 7 },
+    ]);
+  });
+
+  it.each([
+    ['no admin id', {}],
+    ['an admin id of 0', { adminId1: '0' }],
+    ['a blank admin id', { adminId1: '' }],
+  ])('drops a 00 first-level code that arrives with %s as a placeholder', (_label, adminId) => {
+    const feature = {
+      geonameId: 1,
+      name: 'n',
+      toponymName: 'n',
+      countryId: '6252001',
+      adminCode1: '00',
+      adminName1: '',
+    };
+    expect(parsePlace({ ...feature, ...adminId }).adminLevels).toEqual([]);
   });
 
   it('keeps level 1 when only the name is present, and a deeper level when only the code is', () => {
@@ -415,18 +536,106 @@ describe('parseTimezone', () => {
     });
   });
 
-  it('keeps a 1 July offset of 0 when a zone id comes with it, whatever the standard offset', () => {
+  it('takes the offsets GeoNames sends for a zone id the runtime rejects, a 1 July 0 included', () => {
     expect(
       parseTimezone({ timezoneId: 'Etc/Test', rawOffset: -1, gmtOffset: -1, dstOffset: 0 }),
-    ).toMatchObject({ rawOffsetInHours: -1, dstOffsetInHours: 0 });
+    ).toMatchObject({ rawOffsetInHours: -1, gmtOffsetInHours: -1, dstOffsetInHours: 0 });
   });
 
-  it('keeps a nonzero 1 July offset as sent when no zone id comes with it', () => {
+  it.each([
+    ['neither offset', { timezoneId: 'Etc/Test', rawOffset: -1, time: '2026-10-18 10:00' }],
+    ['one offset', { timezoneId: 'Etc/Test', rawOffset: -1, gmtOffset: -1 }],
+    ['no local year and no offsets', { timezoneId: 'Australia/Sydney', rawOffset: 10 }],
+  ])(
+    'fails as upstream_unexpected_shape when it cannot derive the offsets and %s came',
+    (_label, body) => {
+      expect(reasonOfThrow(() => parseTimezone(body))).toEqual({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        reason: 'upstream_unexpected_shape',
+      });
+    },
+  );
+
+  it('reports the standard offset for both dates offshore, whatever 1 July offset is sent', () => {
     expect(parseTimezone({ rawOffset: -3, gmtOffset: -3, dstOffset: -2 })).toEqual({
       rawOffsetInHours: -3,
       gmtOffsetInHours: -3,
-      dstOffsetInHours: -2,
+      dstOffsetInHours: -3,
     });
+    expect(parseTimezone({ rawOffset: -3, gmtOffset: 4, dstOffset: 4 })).toMatchObject({
+      gmtOffsetInHours: -3,
+      dstOffsetInHours: -3,
+    });
+  });
+
+  it.each([
+    ['Europe/Paris', 1, 2],
+    ['Australia/Sydney', 11, 10],
+    ['Asia/Kathmandu', 5.75, 5.75],
+    ['Pacific/Chatham', 13.75, 12.75],
+    ['America/St_Johns', -3.5, -2.5],
+  ])(
+    'derives the 1 January and 1 July offsets of %s from the zone when GeoNames sends neither',
+    (timezoneId, january, july) => {
+      const body = { timezoneId, rawOffset: 0, time: '2026-10-18 12:00' };
+      expect(parseTimezone(body)).toMatchObject({
+        timezoneId,
+        gmtOffsetInHours: january,
+        dstOffsetInHours: july,
+      });
+    },
+  );
+
+  it.each([
+    ['2024-01-01 00:30', 6, 5],
+    ['2026-10-18 10:43', 5, 5],
+  ])('takes the year from the local time: Asia/Almaty at %s is %d / %d', (time, january, july) => {
+    const body = { timezoneId: 'Asia/Almaty', rawOffset: 5, gmtOffset: 5, dstOffset: 5, time };
+    expect(parseTimezone(body)).toMatchObject({
+      gmtOffsetInHours: january,
+      dstOffsetInHours: july,
+    });
+  });
+
+  it("reports the zone's offsets over GeoNames' when the two disagree, and its rawOffset as sent", () => {
+    expect(parseTimezone({ ...TIMEZONE_PARIS_BODY, gmtOffset: 7, dstOffset: 7 })).toMatchObject({
+      rawOffsetInHours: 1,
+      gmtOffsetInHours: 1,
+      dstOffsetInHours: 2,
+    });
+    const casablanca = {
+      timezoneId: 'Africa/Casablanca',
+      rawOffset: 0,
+      time: '2026-10-18 06:43',
+    };
+    expect(parseTimezone(casablanca)).toMatchObject({
+      rawOffsetInHours: 0,
+      gmtOffsetInHours: 1,
+      dstOffsetInHours: 1,
+    });
+  });
+
+  it('parses a real onshore body unchanged without the offsets GeoNames no longer documents', () => {
+    expect(parseTimezone(withoutSentOffsets(TIMEZONE_SYDNEY_BODY))).toEqual(
+      parseTimezone(TIMEZONE_SYDNEY_BODY),
+    );
+    expect(parseTimezone(withoutSentOffsets(TIMEZONE_SYDNEY_BODY))).toEqual({
+      timezoneId: 'Australia/Sydney',
+      countryCode: 'AU',
+      countryName: 'Australia',
+      rawOffsetInHours: 10,
+      gmtOffsetInHours: 11,
+      dstOffsetInHours: 10,
+      localTime: '2026-10-18 16:42',
+      sunrise: '2026-10-18 06:10',
+      sunset: '2026-10-18 19:10',
+    });
+  });
+
+  it('reports the open-Pacific offsets with or without the sent pair', () => {
+    const expected = { rawOffsetInHours: -10, gmtOffsetInHours: -10, dstOffsetInHours: -10 };
+    expect(parseTimezone(TIMEZONE_OPEN_PACIFIC_BODY)).toEqual(expected);
+    expect(parseTimezone(withoutSentOffsets(TIMEZONE_OPEN_PACIFIC_BODY))).toEqual(expected);
   });
 
   it('reports the standard offset for 1 July offshore, where GeoNames sends the dstOffset 0 placeholder', () => {
@@ -441,6 +650,88 @@ describe('parseTimezone', () => {
   it.each(['', '  '])('reads a blank timezoneId (%j) as absent', (timezoneId) => {
     const result = parseTimezone({ timezoneId, rawOffset: 7, gmtOffset: 7, dstOffset: 0 });
     expect(result).toEqual({ rawOffsetInHours: 7, gmtOffsetInHours: 7, dstOffsetInHours: 7 });
+  });
+});
+
+describe("parseTimezone's sunrise and sunset", () => {
+  const events = (body: Record<string, unknown>) => {
+    const { sunrise, sunset } = parseTimezone(body);
+    return { sunrise, sunset };
+  };
+
+  it.each([
+    [
+      'Tonga, whose default pair is the next local day',
+      TIMEZONE_TONGA_DATED_BODY,
+      '2026-10-18 06:07',
+      '2026-10-18 18:44',
+    ],
+    [
+      'Los Angeles in the evening, whose default pair is the next local day',
+      TIMEZONE_LOS_ANGELES_DATED_BODY,
+      '2026-10-17 06:59',
+      '2026-10-17 18:16',
+    ],
+    [
+      'Sydney after local midnight, whose default pair is the previous local day',
+      TIMEZONE_SYDNEY_DATED_BODY,
+      '2026-10-18 06:10',
+      '2026-10-18 19:10',
+    ],
+  ])('takes the dates[0] pair for %s', (_label, body, sunrise, sunset) => {
+    expect(events(body)).toEqual({ sunrise, sunset });
+    expect(parseTimezone(body).localTime?.slice(0, 10)).toBe(sunrise.slice(0, 10));
+  });
+
+  it.each([
+    ['Auckland, whose dates[0] pair is the next day', TIMEZONE_AUCKLAND_DATED_BODY],
+    ['Paris, with no dates[] at all', TIMEZONE_PARIS_BODY],
+  ])('keeps a default pair already on the local date: %s', (_label, body) => {
+    expect(events(body)).toEqual({ sunrise: body.sunrise, sunset: body.sunset });
+  });
+
+  it.each([
+    ['polar night, where neither pair has an event', TIMEZONE_POLAR_DATED_BODY],
+    ['both pairs on other dates', { ...TIMEZONE_TONGA_DATED_BODY, time: '2026-10-20 08:00' }],
+    ['a local time with no date', { ...TIMEZONE_TONGA_DATED_BODY, time: '20:50' }],
+    ['no local time', withoutLocalTime(TIMEZONE_PARIS_BODY)],
+    ['offshore', TIMEZONE_OPEN_PACIFIC_BODY],
+  ])('returns neither event for %s', (_label, body) => {
+    const result = parseTimezone(body);
+    expect(result).not.toHaveProperty('sunrise');
+    expect(result).not.toHaveProperty('sunset');
+  });
+
+  it('dates a pair by its sunrise, and by its sunset only when it has no sunrise', () => {
+    const base = { timezoneId: 'Arctic/Longyearbyen', rawOffset: 1, time: '2026-10-18 23:40' };
+    const setOnly = {
+      ...base,
+      sunset: '2026-10-18 00:20',
+      dates: [{ sunset: '2026-10-19 00:10' }],
+    };
+    expect(events(setOnly)).toEqual({ sunrise: undefined, sunset: '2026-10-18 00:20' });
+    const lateSet = {
+      ...base,
+      sunrise: '2026-10-17 02:10',
+      sunset: '2026-10-18 00:20',
+      dates: [{ date: '2026-10-19', sunrise: '2026-10-18 02:15', sunset: '2026-10-19 00:05' }],
+    };
+    expect(events(lateSet)).toEqual({ sunrise: '2026-10-18 02:15', sunset: '2026-10-19 00:05' });
+  });
+
+  it.each([
+    ['not an array', 'x'],
+    ['an empty array', []],
+    ['an array of a non-object', ['2026-10-17']],
+  ])('reads only the default pair when dates is %s', (_label, dates) => {
+    expect(events({ ...TIMEZONE_PARIS_BODY, dates })).toEqual({
+      sunrise: TIMEZONE_PARIS_BODY.sunrise,
+      sunset: TIMEZONE_PARIS_BODY.sunset,
+    });
+    expect(events({ ...TIMEZONE_TONGA_DATED_BODY, dates })).toEqual({
+      sunrise: undefined,
+      sunset: undefined,
+    });
   });
 });
 

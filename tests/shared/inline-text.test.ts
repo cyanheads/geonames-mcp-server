@@ -1,12 +1,13 @@
 /**
  * @fileoverview Inline-text helpers: upstream-authored and caller-echoed text stays on
- * one line and inert in markdown slots; URLs print as plain text, never as links.
+ * one line and inert in markdown slots, with line-start escapes only where the text
+ * opens a line; URLs print as plain text, never as links.
  * Invisible characters are built from code points so the source carries none of them.
  * @module tests/shared/inline-text.test
  */
 
 import { describe, expect, it } from 'vitest';
-import { inlineText, plainUrl, tableCell } from '@/utils/inline-text.js';
+import { blockStartText, inlineText, plainUrl, tableCell } from '@/utils/inline-text.js';
 
 /** The character at a code point. */
 const cp = (codePoint: number) => String.fromCodePoint(codePoint);
@@ -14,6 +15,8 @@ const cp = (codePoint: number) => String.fromCodePoint(codePoint);
 const LINE_SEPARATOR = cp(0x2028);
 const PARAGRAPH_SEPARATOR = cp(0x2029);
 const RLO = cp(0x202e);
+const ZWSP = cp(0x200b);
+const NBSP = cp(0x00a0);
 
 describe('inlineText', () => {
   it('returns plain text unchanged', () => {
@@ -94,13 +97,13 @@ describe('inlineText', () => {
     ['ftp://example.com', 'ftp\\[:\\]//example.com'],
     ['www.example.com', 'www\\[.\\]example.com'],
     ['WWW.Example.com', 'WWW\\[.\\]Example.com'],
-    ['_https://example.com', '_https\\[:\\]//example.com'],
+    ['_https://example.com', '\\_https\\[:\\]//example.com'],
   ])('prints the bare URL %s so no renderer autolinks it', (url, expected) => {
     expect(inlineText(`Visit ${url} now`)).toBe(`Visit ${expected} now`);
   });
 
   it('prints a URL split by invisible characters so it does not autolink once they are gone', () => {
-    expect(inlineText(`https${cp(0x200b)}://ex${cp(0xe0041)}ample.com`)).toBe(
+    expect(inlineText(`https${ZWSP}://ex${cp(0xe0041)}ample.com`)).toBe(
       'https\\[:\\]//example.com',
     );
     expect(inlineText(`www${cp(0x2060)}.example.com`)).toBe('www\\[.\\]example.com');
@@ -132,6 +135,158 @@ describe('inlineText', () => {
   it('handles every rule together', () => {
     expect(inlineText(`x\r\n[a]${RLO} <b>`)).toBe('x  \\[a\\] &lt;b&gt;');
   });
+
+  it('escapes emphasis, code-span, and strikethrough delimiters', () => {
+    expect(inlineText('**North** _Fork_ `Creek` ~~Old~~')).toBe(
+      '\\*\\*North\\*\\* \\_Fork\\_ \\`Creek\\` \\~\\~Old\\~\\~',
+    );
+    expect(inlineText('Binyamina-Giv`at `Ada')).toBe('Binyamina-Giv\\`at \\`Ada');
+    expect(inlineText('a*b')).toBe('a\\*b');
+    expect(inlineText('a~b')).toBe('a\\~b');
+  });
+
+  it.each([
+    ['an identifier', 'W14_01'],
+    ['a timezone id', 'America/Los_Angeles'],
+    ['digits', '12_34'],
+    ['a run of underscores', 'a__b__c'],
+    ['letters outside ASCII', 'Ñandú_Ñu'],
+    ['a combining mark', `e${cp(0x301)}_x`],
+    ['a letter outside the BMP', `${cp(0x20000)}_${cp(0x20001)}`],
+  ])('keeps an underscore between two letters, digits, or marks in %s', (_name, text) => {
+    expect(inlineText(text)).toBe(text);
+  });
+
+  it.each([
+    ['Ipanema _Nh_', 'Ipanema \\_Nh\\_'],
+    ['_lead', '\\_lead'],
+    ['trail_', 'trail\\_'],
+    ['a __b', 'a \\_\\_b'],
+    ['(_x_)', '(\\_x\\_)'],
+    ['a_-b', 'a\\_-b'],
+    [`a_${cp(0x20000)} _`, `a_${cp(0x20000)} \\_`],
+    [`${cp(0x20000)}_ x`, `${cp(0x20000)}\\_ x`],
+  ])('escapes the word-boundary underscores of %s', (text, expected) => {
+    expect(inlineText(text)).toBe(expected);
+  });
+
+  it('escapes the backslash first, so an author-written backslash cannot cancel a delimiter escape', () => {
+    expect(inlineText('\\*x')).toBe('\\\\\\*x');
+    expect(inlineText('\\`x')).toBe('\\\\\\`x');
+    expect(inlineText('\\~x')).toBe('\\\\\\~x');
+    expect(inlineText('a\\_b')).toBe('a\\\\\\_b');
+  });
+
+  it.each([
+    '4. Wiener Gemeindebezirk',
+    '1) Erste',
+    '#####',
+    '####',
+    '### ##',
+    'AZ ####',
+    '@@ ##',
+    '# Hash',
+    '- Dash',
+    '---',
+    '+ Plus',
+    'Lot #',
+    '#',
+    '    four-space indent',
+  ])('prints the line-start marker of %j as written: no block opens inside a line', (text) => {
+    expect(inlineText(text)).toBe(text);
+  });
+
+  it('flattens a leading tab to a space and leaves the marker after it alone', () => {
+    expect(inlineText('\t- Tab')).toBe(' - Tab');
+  });
+
+  it('still escapes a leading star and turns a leading > into an entity', () => {
+    expect(inlineText('* Star')).toBe('\\* Star');
+    expect(inlineText('> Quote')).toBe('&gt; Quote');
+  });
+});
+
+describe('blockStartText', () => {
+  it('applies every inline rule', () => {
+    const text = `**North** _Fork_ \`Creek\` [x](https://e.test) <b> W14_01${RLO}\n&#58;`;
+    expect(blockStartText(text)).toBe(inlineText(text));
+    expect(blockStartText('Seattle, Washington')).toBe('Seattle, Washington');
+  });
+
+  it.each([
+    ['4. Wiener Gemeindebezirk', '4\\. Wiener Gemeindebezirk'],
+    ['1) Erste', '1\\) Erste'],
+    ['123456789. Nine digits', '123456789\\. Nine digits'],
+    ['7.', '7\\.'],
+    ['- Dash', '\\- Dash'],
+    ['-', '\\-'],
+    ['---', '\\---'],
+    ['-- -', '\\-- -'],
+    ['+ Plus', '\\+ Plus'],
+    ['# Hash', '\\# Hash'],
+    ['###### Six', '\\###### Six'],
+    ['#', '\\#'],
+    ['#####', '\\#####'],
+    ['  3. Indented', '3\\. Indented'],
+    ['\t- Tab', '\\- Tab'],
+    [`${ZWSP}- Hidden`, '\\- Hidden'],
+    [`  ${ZWSP}  + Hidden`, '\\+ Hidden'],
+    ['* Star', '\\* Star'],
+    ['> Quote', '&gt; Quote'],
+  ])('escapes the leading block marker of %j', (text, expected) => {
+    expect(blockStartText(text)).toBe(expected);
+  });
+
+  it.each([
+    ['    four-space indent', 'four-space indent'],
+    ['        eight spaces', 'eight spaces'],
+    ['\t\tTwo tabs', 'Two tabs'],
+    [`  ${ZWSP}   Hidden`, 'Hidden'],
+    [' One', 'One'],
+    ['   ', ''],
+  ])(
+    'drops the leading spaces of %j, so four or more cannot open an indented code block',
+    (text, expected) => {
+      expect(blockStartText(text)).toBe(expected);
+    },
+  );
+
+  it('keeps leading no-break spaces, which never indent, and inner spaces', () => {
+    expect(blockStartText(`${NBSP.repeat(4)}x`)).toBe(`${NBSP.repeat(4)}x`);
+    expect(blockStartText('a    b')).toBe('a    b');
+  });
+
+  it.each([
+    'Route 4. North',
+    '4.5 Mile Creek',
+    '1234567890. Ten digits',
+    '#5 Mine',
+    '####### Seven',
+    '-5 Below',
+    '--x',
+    '+1',
+    '2)x',
+  ])('leaves %j alone: no block starts there', (text) => {
+    expect(blockStartText(text)).toBe(text);
+  });
+
+  it.each([
+    ['Lot #', 'Lot \\#'],
+    ['Lot ##  ', 'Lot \\##  '],
+    ['# #', '\\# \\#'],
+    ['##', '\\##'],
+    ['#######', '\\#######'],
+    ['####### #', '####### \\#'],
+  ])(
+    'escapes the closing hashes of %j, which a heading drops as its closing sequence',
+    (text, expected) => {
+      expect(blockStartText(text)).toBe(expected);
+    },
+  );
+
+  it.each(['Lot#', 'Lot # 5', 'C# Street'])('leaves the hashes of %j alone', (text) => {
+    expect(blockStartText(text)).toBe(text);
+  });
 });
 
 describe('tableCell', () => {
@@ -151,6 +306,13 @@ describe('tableCell', () => {
 
   it('applies the inline rules', () => {
     expect(tableCell('[x] <y>')).toBe('\\[x\\] &lt;y&gt;');
+  });
+
+  it('applies the delimiter escapes, prints line-start markers as written, then escapes pipes', () => {
+    expect(tableCell('4. `a`|*b* _c_|W14_01')).toBe('4. \\`a\\`\\|\\*b\\* \\_c\\_\\|W14_01');
+    expect(tableCell('#####')).toBe('#####');
+    expect(tableCell('### ##')).toBe('### ##');
+    expect(tableCell('@# #@@|@## #@@')).toBe('@# #@@\\|@## #@@');
   });
 });
 
@@ -186,10 +348,43 @@ describe('plainUrl', () => {
     expect(plainUrl('https://example.test/a\rb')).toBe('https://example.test/a%0Db');
     expect(plainUrl(`https://example.test/a${cp(0)}b`)).toBe('https://example.test/a%00b');
     expect(plainUrl(`https://example.test/a${RLO}b`)).toBe('https://example.test/a%E2%80%AEb');
-    expect(plainUrl(`https://example.test/a${cp(0x200b)}b`)).toBe(
-      'https://example.test/a%E2%80%8Bb',
-    );
+    expect(plainUrl(`https://example.test/a${ZWSP}b`)).toBe('https://example.test/a%E2%80%8Bb');
     expect(plainUrl(`https://example.test/a${cp(0xad)}b`)).toBe('https://example.test/a%C2%ADb');
+  });
+
+  it('percent-encodes every * and ~, which emphasis and strikethrough read even inside a URL', () => {
+    expect(plainUrl('https://x.test/a*b*c')).toBe('https://x.test/a%2Ab%2Ac');
+    expect(plainUrl('https://x.test/~a/~~b~~')).toBe('https://x.test/%7Ea/%7E%7Eb%7E%7E');
+    expect(plainUrl('x.test/*')).toBe('https://x.test/%2A');
+  });
+
+  it('judges an underscore by the encoded text beside it', () => {
+    expect(plainUrl('https://x.test/(*_b_')).toBe('https://x.test/(%2A_b_');
+    expect(plainUrl('https://x.test/(<_b_')).toBe('https://x.test/(%3C_b_');
+  });
+
+  it.each([
+    ['https://x.test/__init__', 'https://x.test/%5F%5Finit%5F%5F'],
+    ['https://x.test/A,_B_(c)', 'https://x.test/A,%5FB%5F(c)'],
+    ['https://x.test/_a_', 'https://x.test/%5Fa%5F'],
+    ['https://x.test/(_a_)/b_c', 'https://x.test/(%5Fa%5F)/b_c'],
+  ])(
+    'percent-encodes the underscores of %s, where one can open emphasis and a later one close it',
+    (url, expected) => {
+      expect(plainUrl(url)).toBe(expected);
+    },
+  );
+
+  it.each([
+    'https://en.wikipedia.org/wiki/New_York_City',
+    'https://en.wikipedia.org/wiki/Springfield,_Illinois',
+    'https://en.wikipedia.org/wiki/Paris_(Texas)',
+    'https://en.wikipedia.org/wiki/Charleston,_West_Virginia',
+    'https://x.test/a_',
+    'https://x.test/_a',
+    'https://x.test/b_(c)_d',
+  ])('keeps the underscores of %s, which cannot pair into emphasis', (url) => {
+    expect(plainUrl(url)).toBe(url);
   });
 
   it('prints a scheme-less URL with injected markup safely', () => {
@@ -218,5 +413,80 @@ describe('plainUrl', () => {
     expect(plainUrl('en.wikipedia.org/wiki/Category:Seattle')).toBe(
       'https://en.wikipedia.org/wiki/Category:Seattle',
     );
+  });
+});
+
+/** Repeats `unit` to exactly `length` characters. */
+const fill = (unit: string, length: number) =>
+  unit.repeat(Math.ceil(length / unit.length)).slice(0, length);
+
+/** A named input shape, built at a given length. */
+type Shape = [name: string, build: (length: number) => string];
+
+const UNDERSCORE_AND_DELIMITER_SHAPES: Shape[] = [
+  ['an underscore run between letters', (n) => `a${'_'.repeat(n)}b`],
+  ['alternating letters and underscores', (n) => fill('a_', n)],
+  ['underscores between spaces', (n) => fill('_ ', n)],
+  ['underscore openers and closers', (n) => fill(',_a_(', n)],
+  ['delimiter runs', (n) => fill('*`~', n)],
+  ['line breaks interleaved', (n) => `${fill('§1 x', n)}\ny`],
+];
+
+const LINE_START_SHAPES: Shape[] = [
+  ['spaces before a list marker', (n) => `${' '.repeat(n)}- x`],
+  ['spaces before an ordered-list marker', (n) => `${' '.repeat(n)}4. x`],
+  ['dashes before a letter', (n) => `${'-'.repeat(n)}x`],
+  ['a dash-and-space line', (n) => `-${fill(' -', n)}`],
+  ['spaced hashes', (n) => fill(' #', n)],
+  ['a hash run before a letter', (n) => ` ${'#'.repeat(n)}x`],
+  ['a leading hash run before a letter', (n) => `${'#'.repeat(n)}x`],
+  ['a hash before trailing spaces and a letter', (n) => ` #${' '.repeat(n)}x`],
+];
+
+/** blockStartText runs inlineText first, so its suite bounds both. */
+describe.each<[string, (text: string) => string, Shape[]]>([
+  ['blockStartText', blockStartText, [...UNDERSCORE_AND_DELIMITER_SHAPES, ...LINE_START_SHAPES]],
+  ['plainUrl', (text) => plainUrl(`https://x.test/${text}`), UNDERSCORE_AND_DELIMITER_SHAPES],
+])('%s cost', (_name, render, shapes) => {
+  /** Shortest input, in characters, of each scaled shape. */
+  const START = 1_250;
+  /** Size doublings past START: six of them span 64×. */
+  const DOUBLINGS = 6;
+  /** Per-call CPU ceiling at every size, in milliseconds of this thread's time. */
+  const CEILING_MS = 250;
+  /** A trial repeats a short input until it has rendered this many characters, so its time reads above the clock's resolution. */
+  const TRIAL_CHARS = 320_000;
+
+  /** The best of three trials of this thread's CPU time per `render(text)` call, in milliseconds. */
+  function cpuMsPerCall(text: string): number {
+    const calls = Math.max(1, Math.ceil(TRIAL_CHARS / text.length));
+    let best = Number.POSITIVE_INFINITY;
+    for (let trial = 0; trial < 3; trial++) {
+      const start = process.threadCpuUsage();
+      for (let call = 0; call < calls; call++) render(text);
+      const used = process.threadCpuUsage(start);
+      best = Math.min(best, (used.user + used.system) / 1000 / calls);
+    }
+    return best;
+  }
+
+  /** Doubles the input from `start` characters `DOUBLINGS` times, holding each size under the ceiling; returns the largest-to-smallest time ratio. */
+  function spanRatio(shape: (length: number) => string, start: number): number {
+    cpuMsPerCall(shape(start));
+    const times: number[] = [];
+    for (let doubling = 0, length = start; doubling <= DOUBLINGS; doubling++, length *= 2) {
+      const ms = cpuMsPerCall(shape(length));
+      expect(ms, `${length} characters`).toBeLessThan(CEILING_MS);
+      times.push(ms);
+    }
+    return (times.at(-1) ?? 0) / Math.max(times[0] ?? 0, 0.001);
+  }
+
+  it.each(shapes)('renders %s in time linear in its length across 64×', (_shape, build) => {
+    expect(spanRatio(build, START)).toBeLessThan(256);
+  });
+
+  it('renders a long digit run in time linear in its length from 5,000 to 320,000 characters', () => {
+    expect(spanRatio((n) => `${'1'.repeat(n)}. x`, 5_000)).toBeLessThan(256);
   });
 });

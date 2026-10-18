@@ -9,8 +9,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   blankAsUnset,
+  clampedLimitInput,
+  clampLimit,
   geonamesUsernameInput,
-  limitInput,
   lowerCased,
   nameContainsInput,
   nameMatcher,
@@ -25,9 +26,12 @@ import {
   type FeatureClass,
 } from '@/services/geonames/feature-codes.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
-import { inlineText, tableCell } from '@/utils/inline-text.js';
+import { renderNotice, tableCell } from '@/utils/inline-text.js';
 
 const TOPICS = ['feature_classes', 'feature_codes', 'postal_countries'] as const;
+
+/** The most entries one page returns; a larger `limit` is held to it. */
+const MAX_LIMIT = 700;
 
 type Topic = (typeof TOPICS)[number];
 
@@ -76,7 +80,7 @@ export const listReferenceTool = tool('geonames_list_reference', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     topic: lowerCased(z.enum(TOPICS)).describe(
-      'Vocabulary to list: feature_classes (the 9 one-letter classes), feature_codes (the 684 codes), or postal_countries (countries with postal-code data). Case-insensitive.',
+      'Vocabulary to list: feature_classes (the 9 one-letter classes), feature_codes (the 684 codes), or postal_countries (countries with postal-code data).',
     ),
     featureClass: blankAsUnset(
       z.preprocess(
@@ -84,12 +88,12 @@ export const listReferenceTool = tool('geonames_list_reference', {
         z.enum(FEATURE_CLASS_CODES).optional(),
       ),
     ).describe(
-      'Topic feature_codes only: keep the codes of this one-letter class (A, H, L, P, R, S, T, U, V). Case-insensitive.',
+      'Topic feature_codes only: keep the codes of this one-letter class (A, H, L, P, R, S, T, U, V).',
     ),
     nameContains: nameContainsInput.describe(
       'Keep only entries whose code, name, or description contains every word of this text as a substring (port also matches airport), ignoring case, accents, and punctuation.',
     ),
-    limit: limitInput(700, 100),
+    limit: clampedLimitInput(MAX_LIMIT, 100),
     offset: offsetInput(),
     geonamesUsername: geonamesUsernameInput.describe(
       "Topic postal_countries only, and only when the list is not already cached: your own GeoNames username, so the call spends that account's credit instead of the server's. The account needs free web services enabled on its geonames.org account page.",
@@ -148,12 +152,15 @@ export const listReferenceTool = tool('geonames_list_reference', {
     totalCount: z.number().describe('Entries matching the topic and filters, before paging.'),
     truncated: z.boolean().describe('True when more entries remain past this page.'),
     shown: z.number().describe('Entries returned on this page.'),
-    cap: z.number().describe('The limit that was applied.'),
+    cap: z.number().describe('The limit applied: limit as given, or 700 when it asked for more.'),
     notice: z
       .string()
       .optional()
-      .describe('Guidance when nothing matched, the offset is past the end, or more pages remain.'),
+      .describe(
+        'Guidance when nothing matched, the offset is past the end, or more pages remain (naming a limit held to 700).',
+      ),
   },
+  enrichmentTrailer: { notice: { render: renderNotice } },
   errors: [
     {
       reason: 'filter_not_applicable',
@@ -210,7 +217,8 @@ export const listReferenceTool = tool('geonames_list_reference', {
   ],
 
   async handler(input, ctx) {
-    ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: input.limit });
+    const limit = clampLimit(input.limit, MAX_LIMIT);
+    ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: limit.applied });
     if (input.featureClass !== undefined && input.topic !== 'feature_codes') {
       throw ctx.fail(
         'filter_not_applicable',
@@ -247,15 +255,21 @@ export const listReferenceTool = tool('geonames_list_reference', {
     const matches = matcher
       ? entries.filter((entry) => matcher([entry.code, entry.name, entry.description]))
       : entries;
-    const { page, nextOffset } = paginate(matches, input.offset, input.limit);
+    const { page, nextOffset } = paginate(matches, input.offset, limit.applied);
 
     ctx.enrich.total(matches.length);
     ctx.enrich({ shown: page.length });
     if (nextOffset !== undefined) {
+      const remaining = matches.length - nextOffset;
       ctx.enrich.truncated({
         shown: page.length,
-        cap: input.limit,
-        guidance: `${matches.length - nextOffset} more ${matches.length - nextOffset === 1 ? 'entry' : 'entries'}; call again with offset ${nextOffset}.`,
+        cap: limit.applied,
+        guidance: [
+          limit.fragment,
+          `${remaining} more ${remaining === 1 ? 'entry' : 'entries'}; call again with offset ${nextOffset}.`,
+        ]
+          .filter(Boolean)
+          .join(' '),
       });
     }
     if (page.length === 0) {
@@ -269,7 +283,7 @@ export const listReferenceTool = tool('geonames_list_reference', {
         );
       } else if (input.nameContains !== undefined) {
         ctx.enrich.notice(
-          `Nothing in ${scope} matches "${inlineText(input.nameContains)}"; call again without nameContains.`,
+          `Nothing in ${scope} matches "${input.nameContains}"; call again without nameContains.`,
         );
       }
     }
