@@ -11,7 +11,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reverseGeocodeTool } from '@/mcp-server/tools/definitions/reverse-geocode.tool.js';
+import { searchPlacesTool } from '@/mcp-server/tools/definitions/search-places.tool.js';
 import { getGeoNamesService, initGeoNamesService } from '@/services/geonames/geonames-service.js';
+import { readLine } from '../fixtures/commonmark.js';
 import {
   declaredError,
   expectDeclaredError,
@@ -27,6 +29,7 @@ import {
   OCEAN_BODY,
   OCEAN_NO_ID_BODY,
   quotaMessage,
+  SEARCH_BODY,
   SERVER_USERNAME,
   SUBDIVISION_PARIS_BODY,
   statusEnvelope,
@@ -937,7 +940,7 @@ describe('notices', () => {
     expect(page(result).notice).toBe(notice(hostile));
     const text = allText(result);
     expect(text.slice(text.lastIndexOf('\n'))).toBe(
-      `\n> ${notice('Sea \\[x\\](http\\[:\\]//e.test)  ## Heading &lt;b&gt;')}`,
+      `\n> ${notice('Sea \\[x\\](http://e.test)  ## Heading &lt;b&gt;')}`,
     );
     expect(headingLines(text)).toEqual([
       '## GeoNames reverse geocode of 30, -40',
@@ -1025,7 +1028,7 @@ describe('notices', () => {
     expect(result).toMatchObject({ truncated: true, shown: 50, cap: 50 });
     expect(result.nearby).toHaveLength(50);
     expect(result.notice).toBe(
-      'Only the nearest 50 are listed, the most one call returns, and more lie within 20 km; list the rest with geonames_search_places and a boundingBox.',
+      'Only the nearest 50 are listed, the most one call returns, and more lie within 20 km. To list them all, call geonames_search_places with {"featureClasses":["P"],"boundingBox":{"north":49.0383,"south":48.6749,"east":2.6284,"west":2.076},"limit":100}: the box encloses the radius, but the search lists its rows in relevance order, not by distance, so read every page (the search reaches its first 5,100 rows; split a box whose totalCount runs past that) and keep the rows whose lat and lng lie within 20 km of this point.',
     );
   });
 
@@ -1039,31 +1042,41 @@ describe('notices', () => {
   describe('a nearbyLimit above the 50 cap', () => {
     const CLAMP = (requested: number) =>
       `nearbyLimit ${requested} was capped at 50, the most this tool returns per call.`;
-    const ROUTE = (radiusKm: number) =>
-      `Only the nearest 50 are listed, and more lie within ${radiusKm} km; list the rest with geonames_search_places and a boundingBox.`;
+    const ROUTE = (radiusKm: number, args: string) =>
+      `Only the nearest 50 are listed, and more lie within ${radiusKm} km. To list them all, call geonames_search_places with ${args}: the box encloses the radius, but the search lists its rows in relevance order, not by distance, so read every page (the search reaches its first 5,100 rows; split a box whose totalCount runs past that) and keep the rows whose lat and lng lie within ${radiusKm} km of this point.`;
+    const PARIS_20 =
+      '{"featureClasses":["P"],"boundingBox":{"north":49.0383,"south":48.6749,"east":2.6284,"west":2.076},"limit":100}';
 
     it.each([51, 80, 1000])(
       'names the clamp of nearbyLimit %i ahead of the routing continuation on a full page',
       async (nearbyLimit) => {
         const fetchFake = serve({ places: nearest(60) });
         const result = await run({ ...PARIS, nearbyLimit });
-        const notice = `${CLAMP(nearbyLimit)} ${ROUTE(20)}`;
+        const notice = `${CLAMP(nearbyLimit)} ${ROUTE(20, PARIS_20)}`;
         expect(sentTo(fetchFake, 'findNearbyPlaceNameJSON')).toContainEqual(['maxRows', '51']);
         expect(page(result)).toMatchObject({ truncated: true, shown: 50, cap: 50, notice });
         expect(page(result).nearby.map((row) => row.geonameId)).toEqual(nearestIds(50));
         const text = allText(result);
         expect(text.split('\n')).toContain('**cap:** 50');
-        expect(text.slice(text.lastIndexOf('\n'))).toBe(`\n> ${notice}`);
+        expect(text.slice(text.lastIndexOf('\n'))).toBe(
+          `\n> ${notice.replaceAll('[', '\\[').replaceAll(']', '\\]')}`,
+        );
+        expect(readLine(text.slice(text.lastIndexOf('\n') + 1))).toMatchObject({
+          live: [],
+          text: notice,
+        });
       },
     );
 
-    it('names the clamp on a full features page the same way', async () => {
+    it('names the clamp on a full features page the same way, with its own feature filter', async () => {
       serve({ features: nearest(51) });
       const result = page(
         await run({ ...PARIS, featureCodes: 'MT', nearbyLimit: 80, radiusKm: 7.5 }),
       );
       expect(result).toMatchObject({ nearbyKind: 'features', truncated: true, shown: 50, cap: 50 });
-      expect(result.notice).toBe(`${CLAMP(80)} ${ROUTE(7.5)}`);
+      expect(result.notice).toBe(
+        `${CLAMP(80)} ${ROUTE(7.5, '{"featureCodes":["MT"],"boundingBox":{"north":48.9248,"south":48.7884,"east":2.4558,"west":2.2486},"limit":100}')}`,
+      );
     });
 
     it.each([50, 12])(
@@ -1094,9 +1107,160 @@ describe('notices', () => {
         'No country contains this point',
         'North Atlantic Ocean',
         CLAMP(80),
-        ROUTE(20),
+        'Only the nearest 50 are listed, and more lie within 20 km.',
+        'geonames_search_places',
         'No IANA timezone covers this point',
       ]);
+    });
+  });
+
+  describe('the full-page route to geonames_search_places', () => {
+    /** The geonames_search_places arguments a full-page notice prints. */
+    const recipeOf = (notice: string | undefined) => {
+      const json = notice?.match(/call geonames_search_places with (\{.*\})(?=:| and )/)?.[1];
+      if (json === undefined) throw new Error(`no search arguments in: ${notice}`);
+      return JSON.parse(json) as {
+        boundingBox?: { east: number; north: number; south: number; west: number };
+        cities?: string;
+        featureClasses?: string[];
+        featureCodes?: string[];
+        limit: number;
+      };
+    };
+
+    /** The point `distanceKm` from (lat, lng) along `bearing` degrees, on a 6,371 km sphere. */
+    const destination = (lat: number, lng: number, bearing: number, distanceKm: number) => {
+      const rad = Math.PI / 180;
+      const d = distanceKm / 6371;
+      const [phi, lambda, theta] = [lat * rad, lng * rad, bearing * rad];
+      const phi2 = Math.asin(
+        Math.sin(phi) * Math.cos(d) + Math.cos(phi) * Math.sin(d) * Math.cos(theta),
+      );
+      const lambda2 =
+        lambda +
+        Math.atan2(
+          Math.sin(theta) * Math.sin(d) * Math.cos(phi),
+          Math.cos(d) - Math.sin(phi) * Math.sin(phi2),
+        );
+      return { lat: phi2 / rad, lng: ((lambda2 / rad + 540) % 360) - 180 };
+    };
+
+    it.each([
+      ['cities', { cities: 'cities5000' }, '{"featureClasses":["P"],"cities":"cities5000",'],
+      ['featureClasses', { featureClasses: 't,h' }, '{"featureClasses":["T","H"],'],
+      ['featureCodes', { featureCodes: 'mt,pk' }, '{"featureCodes":["MT","PK"],'],
+      [
+        'both lists',
+        { featureClasses: 'T', featureCodes: 'MT' },
+        '{"featureClasses":["T"],"featureCodes":["MT"],',
+      ],
+    ])('names the filter of the call itself (%s)', async (_label, filter, lead) => {
+      serve({ places: nearest(51), features: nearest(51) });
+      const result = page(await run({ ...PARIS, ...filter, nearbyLimit: 50 }));
+      expect(result.notice).toContain(`call geonames_search_places with ${lead}"boundingBox":`);
+    });
+
+    it.each([
+      [48.8566, 2.3522, 20],
+      [46.55, 8, 20],
+      [-33.9, 151.2, 300],
+      [64.15, -21.94, 0.5],
+      [85, 10, 300],
+      [0, 179, 100],
+      [0, -179, 100],
+      [-62, -58.5, 300],
+    ])(
+      'prints a box at %f, %f (%f km) that encloses every point GeoNames can place inside the radius',
+      async (lat, lng, radiusKm) => {
+        serve({ places: nearest(51) });
+        const { boundingBox: box } = recipeOf(
+          page(await run({ lat, lng, radiusKm, nearbyLimit: 50 })).notice,
+        );
+        if (box === undefined) throw new Error('no box printed');
+        // Samples just past the radius; the 1% margin itself covers GeoNames' distances, up to 0.2% under the haversine.
+        for (let bearing = 0; bearing < 360; bearing += 0.5) {
+          const edge = destination(lat, lng, bearing, radiusKm * 1.0005);
+          expect(edge.lat).toBeLessThanOrEqual(box.north);
+          expect(edge.lat).toBeGreaterThanOrEqual(box.south);
+          expect(edge.lng).toBeLessThanOrEqual(box.east);
+          expect(edge.lng).toBeGreaterThanOrEqual(box.west);
+        }
+        expect([box.north, box.south, box.east, box.west].every(Number.isFinite)).toBe(true);
+        expect(box.south).toBeLessThan(box.north);
+        expect(box.west).toBeLessThan(box.east);
+      },
+    );
+
+    it.each([
+      ['the North Pole', 89.9, 0, { north: 90, south: 89.7183, east: 180, west: -180 }],
+      ['the South Pole', -89.9, 0, { north: -89.7183, south: -90, east: 180, west: -180 }],
+      ['a pole exactly', 90, 45, { north: 90, south: 89.8183, east: 180, west: -180 }],
+    ])(
+      'spans every longitude when the radius takes in %s, latitudes held to ±90',
+      async (_label, lat, lng, box) => {
+        serve({ places: nearest(51) });
+        const result = page(await run({ lat, lng, nearbyLimit: 50 }));
+        expect(recipeOf(result.notice).boundingBox).toEqual(box);
+      },
+    );
+
+    it.each([
+      ['Paris, cities', { ...PARIS, cities: 'cities5000' }],
+      [
+        'the Alps, both feature lists',
+        { lat: 46.55, lng: 8, featureClasses: 'T', featureCodes: 'MT' },
+      ],
+      ['the North Pole', { lat: 89.9, lng: 0 }],
+    ])(
+      'prints arguments geonames_search_places takes as they stand, sending the box (%s)',
+      async (_label, point) => {
+        serve({ places: nearest(51), features: nearest(51) });
+        const recipe = recipeOf(page(await run({ ...point, nearbyLimit: 50 })).notice);
+        const fetchFake = installService({ searchJSON: () => jsonResponse(SEARCH_BODY) });
+        successOf(await runToolContract(searchPlacesTool, recipe as never));
+        const sent = sentTo(fetchFake, 'searchJSON');
+        const box = recipe.boundingBox;
+        if (box === undefined) throw new Error('no box printed');
+        for (const side of ['north', 'south', 'east', 'west'] as const) {
+          expect(sent).toContainEqual([side, String(box[side])]);
+        }
+        expect(sent).toContainEqual(['maxRows', '100']);
+      },
+    );
+
+    it.each([
+      [0, 179.95],
+      [-17.8, -179.9],
+      [65, 179.7],
+    ])(
+      'prints no box when the radius around %f, %f crosses the 180° meridian, and says to split it',
+      async (lat, lng) => {
+        serve({ places: nearest(51) });
+        const result = page(await run({ lat, lng, nearbyLimit: 50 }));
+        expect(result.notice).toBe(
+          'Only the nearest 50 are listed, the most one call returns, and more lie within 20 km. To list them all, call geonames_search_places with {"featureClasses":["P"],"limit":100} and a boundingBox on each side of the 180° meridian, which the radius crosses and one box cannot span; the search lists rows in relevance order, not by distance, so read every page (the search reaches its first 5,100 rows; split a box whose totalCount runs past that) and keep the rows whose lat and lng lie within 20 km of this point.',
+        );
+        expect(recipeOf(result.notice)).not.toHaveProperty('boundingBox');
+      },
+    );
+
+    it('prints the box a radius just short of the meridian still fits', async () => {
+      serve({ places: nearest(51) });
+      const result = page(await run({ lat: 0, lng: 179.8, radiusKm: 20, nearbyLimit: 50 }));
+      expect(recipeOf(result.notice).boundingBox).toEqual({
+        north: 0.1817,
+        south: -0.1817,
+        east: 179.9817,
+        west: 179.6183,
+      });
+    });
+
+    it('keeps the raise clause below nearbyLimit 50, with no search route', async () => {
+      serve({ places: nearest(31) });
+      const result = page(await run({ ...PARIS, nearbyLimit: 30 }));
+      expect(result.notice).toBe(
+        'Only the nearest 30 are listed, and more lie within 20 km; raise nearbyLimit (max 50) to see them.',
+      );
     });
   });
 
@@ -1332,7 +1496,7 @@ describe('coastal buffer', () => {
     expect(page(result).notice).toBe(notice(hostile));
     const text = allText(result);
     expect(text.slice(text.lastIndexOf('\n'))).toBe(
-      `\n> ${notice('Evil  &gt; quote \\*bold\\* \\[x\\](http\\[:\\]//e.test) &lt;b&gt;')}`,
+      `\n> ${notice('Evil  &gt; quote \\*bold\\* \\[x\\](http://e.test) &lt;b&gt;')}`,
     );
     expect(text.split('\n').filter((line) => line.startsWith('>'))).toHaveLength(1);
     expect(text).not.toContain('<b>');
@@ -1564,6 +1728,12 @@ describe('input conflicts', () => {
     expect(featureClasses.description).toContain('intersect');
     expect(featureCodes.description).toContain('intersect');
     expect(featureCodes.description).toContain('Each code implies its class');
+  });
+
+  it('says a city section with its own population passes the cities tier', () => {
+    expect(reverseGeocodeTool.input.shape.cities.description).toContain(
+      "A city's sections (PPLX) with their own population pass too.",
+    );
   });
 });
 
@@ -2162,11 +2332,11 @@ describe('format()', () => {
       '### Nearest populated places (nearbyKind populated_places)',
       '### Timezone',
     ]);
-    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
+    expect(rendered).toContain('\\[x\\](http://e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
     expect(data.timezone?.sunset).toBe('2026-09-30 <s>');
-    expect(rendered).toContain('- **Sunrise:** 2026-09-30 \\[s\\](http\\[:\\]//e.test)\n');
+    expect(rendered).toContain('- **Sunrise:** 2026-09-30 \\[s\\](http://e.test)\n');
     expect(rendered).not.toContain('<s>');
     expect(rendered).not.toContain(bidi);
     expect(rendered).not.toContain('\r');

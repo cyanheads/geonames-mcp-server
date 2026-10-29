@@ -19,7 +19,7 @@ import {
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import { defaultIsTransient, httpStatusToErrorCode } from '@cyanheads/mcp-ts-core/utils';
-import { inlineText } from '@/utils/inline-text.js';
+import { singleLineText } from '@/utils/inline-text.js';
 import type { AccountSource } from './types.js';
 
 /** GeoNames statuses that are results rather than failures: no record, no result, no postal code. */
@@ -39,10 +39,7 @@ function accountPhrase(source: AccountSource): string {
 
 const capitalize = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 
-/**
- * Replaces every occurrence of `username` (case-insensitive) with `{account}`, a
- * placeholder with no characters the inline-text helper escapes.
- */
+/** Replaces every occurrence of `username` (case-insensitive) with an `{account}` placeholder. */
 function scrubAccount(text: string, username: string): string {
   return text.replace(
     new RegExp(username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
@@ -137,7 +134,10 @@ export function upstreamUnreachable(): McpError {
 const QUOTA_WINDOWS = { 18: 'day', 19: 'hour', 20: 'week' } as const;
 const QUOTA_ADJECTIVES = { day: 'daily', hour: 'hourly', week: 'weekly' } as const;
 
-/** Status codes whose GeoNames text names the rejected parameter and is forwarded, scrubbed. */
+/**
+ * Status codes whose GeoNames text names the rejected parameter and is forwarded, scrubbed
+ * and on one line, without markdown escapes: the framework escapes the `content[]` line.
+ */
 const PARAMETER_STATUSES = new Set([14, 21, 24, 25, 27]);
 
 /** The account a status envelope arrived for, as {@link mapStatus} needs it. */
@@ -184,7 +184,7 @@ export function mapStatus(
   }
   if (PARAMETER_STATUSES.has(value)) {
     throw validationError(
-      `GeoNames rejected a parameter: ${inlineText(scrubAccount(message, account.username))}`,
+      `GeoNames rejected a parameter: ${singleLineText(scrubAccount(message, account.username))}`,
       { reason: 'upstream_rejected_parameter', upstreamStatus: value },
     );
   }

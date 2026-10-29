@@ -131,14 +131,23 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
             adminCode1: z
               .string()
               .optional()
-              .describe('First-order admin division code (state, province).'),
+              .describe(
+                "First-order admin division code (state, province) as the postal dataset records it, which can differ from the gazetteer code geonames_search_places filters on: DE 80331 carries BY here, where the gazetteer codes Bavaria 02. Not a geonames_search_places filter; for the gazetteer codes, call geonames_reverse_geocode at the row's lat and lng.",
+              ),
             adminName1: z.string().optional().describe('First-order admin division name.'),
             adminCode2: z
               .string()
               .optional()
-              .describe('Second-order admin division code (county, district).'),
+              .describe(
+                'Second-order admin division code (county, district) as the postal dataset records it, which can differ from the gazetteer code (Greater London rows carry 11609024, GLA, or E99999999). Not a geonames_search_places filter.',
+              ),
             adminName2: z.string().optional().describe('Second-order admin division name.'),
-            adminCode3: z.string().optional().describe('Third-order admin division code.'),
+            adminCode3: z
+              .string()
+              .optional()
+              .describe(
+                'Third-order admin division code as the postal dataset records it. Not a geonames_search_places filter.',
+              ),
             adminName3: z.string().optional().describe('Third-order admin division name.'),
             iso3166_2: z
               .string()
@@ -320,7 +329,9 @@ export const findPostalCodesTool = tool('geonames_find_postal_codes', {
       if (clampFragment !== undefined) fragments.push(clampFragment);
       if (point) {
         fragments.push(
-          `More postal codes lie within ${input.radiusKm} km; ${limit < MAX_LIMIT ? `raise limit (max ${MAX_LIMIT}) to see them.` : `${clampFragment === undefined ? `${MAX_LIMIT} is the most one call returns, so ` : ''}query again from other points in the area to reach them.`}`,
+          limit < MAX_LIMIT
+            ? `More postal codes lie within ${input.radiusKm} km; raise limit (max ${MAX_LIMIT}) to see them.`
+            : `More postal codes lie within ${input.radiusKm} km, but ${clampFragment === undefined ? `${MAX_LIMIT} is the most one call returns and ` : ''}the nearby lookup does not page, so the rest cannot be reached in order of distance; a call from another point returns the nearest ${MAX_LIMIT} to that point.`,
         );
       } else if (nextOffset === undefined) {
         fragments.push(

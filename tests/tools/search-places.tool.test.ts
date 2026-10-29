@@ -1027,6 +1027,12 @@ describe('feature filters, which GeoNames intersects', () => {
     expect(featureCodes.description).toContain('Each code implies its class');
     expect(cities.description).toContain('populated places (class P)');
   });
+
+  it('says a city section with its own population passes the cities tier', () => {
+    expect(searchPlacesTool.input.shape.cities.description).toContain(
+      "A city's sections (PPLX) with their own population pass too.",
+    );
+  });
 });
 
 describe('administrative codes', () => {
@@ -1809,11 +1815,22 @@ describe('zero-result notices', () => {
       effectiveQuery: `exact_name "${hostile}"`,
       notice: `${NO_MATCH(`exact_name "${hostile}"`)} ${exact(hostile)}`,
     });
-    const echoed = 'evil  ## Heading \\[x\\](http\\[:\\]//e.test) &lt;b&gt;';
+    const echoed = 'evil  ## Heading \\[x\\](http://e.test) &lt;b&gt;';
     const text = allText(result);
     expect(text).toContain(`\n**effectiveQuery:** exact_name "${echoed}"\n`);
     expect(text.slice(text.lastIndexOf('\n'))).toBe(
       `\n> ${NO_MATCH(`exact_name "${echoed}"`)} ${exact(echoed)}`,
+    );
+  });
+
+  it('prints a URL query as written in the trailer and the notice, as structuredContent carries it', async () => {
+    serve(EMPTY_GEONAMES_BODY);
+    const result = await run({ query: 'www.example.com', limit: 1 });
+    expect(successOf<Page>(result).effectiveQuery).toBe('name_required "www.example.com"');
+    const text = allText(result);
+    expect(text).toContain('\n**effectiveQuery:** name_required "www.example.com"\n');
+    expect(text.slice(text.lastIndexOf('\n'))).toBe(
+      `\n> ${NO_MATCH('name_required "www.example.com"')} ${NAME_REQUIRED}`,
     );
   });
 
@@ -2009,7 +2026,7 @@ describe('format()', () => {
     expect(successOf<Page>(result).places[0]?.name).toBe(hostile);
     expect(tableRows(rendered)).toHaveLength(4);
     expect(headingLines(rendered)).toEqual(['## GeoNames places']);
-    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
+    expect(rendered).toContain('\\[x\\](http://e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);

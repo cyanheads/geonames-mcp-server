@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/geonames-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/geonames-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/geonames-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/geonames-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/geonames-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/geonames-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -61,6 +61,8 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, link
 
 - One `geonameId`; an unknown id returns `found: false` with `guidance`
 - Returns `adminLevels` 1–5 (code, name, `geonameId`), timezone (UTC offsets on 1 January and 1 July), bounding box, recorded and DEM elevation, population, Wikipedia URL, `alternateNames`, `postalCodes`, `links`, and `identifiers` (IATA, ICAO, FAA, Transport Canada, UN/LOCODE, Wikidata)
+- The timezone is the zone GeoNames associates with the record. On a record with no country (an ocean, a sea, a continent) a notice says so and gives the `geonames_reverse_geocode` call for the time at its coordinates
+- `postalCodes` lists the codes GeoNames links to the feature, which can be fewer than `geonames_find_postal_codes` returns for the place
 - `nameLanguages` (up to 20 tags; `zh` also matches `zh-CN`) filters `alternateNames` only
 
 ---
@@ -76,7 +78,7 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, link
 
 - `hierarchy`: `administrative` (default), `tourism` (islands, coasts, and their municipalities; almost all in Spain), or `dependency` (a country's dependent territories). Children are mostly admin divisions (class A) and populated places (class P); continents and coasts are class L, islands class T
 - GeoNames answers a `tourism` or `dependency` request with the administrative children when the feature has no such tree. The tool compares the two lists and sets `sameAsAdministrative`, with a notice, when they match; the rows stay, since a real tree can match too
-- Fetches up to 1,000 children per parent once and caches them, so `nameContains`, `limit` (1–1,000, default 100, held to 500 per call with a notice when more remain), and `offset` cost no extra credits; a notice says when GeoNames lists more
+- Fetches up to 1,000 children per parent once and caches them, so `nameContains`, `limit` (1–1,000, default 100, held to 500 per call with a notice when more remain), and `offset` cost no extra credits; a notice says when GeoNames lists more. A `nameContains` with no letter or digit fails before any request as `name_contains_unsearchable`
 - An unknown id returns `found: false`; a leaf returns an empty `children` list with a notice
 
 ---
@@ -86,6 +88,7 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, link
 - `lat` / `lng` resolve to `country` and `adminLevels` (down to ADM5, each with its `geonameId` and ISO 3166-2 subdivision code where one exists) or, offshore, the `ocean`
 - `coastalBufferKm` (0–50, default 0) matches the nearest country within that distance when none contains the point, for harbor, pier, and shoreline fixes; a buffered match carries `country.distanceInKm`, and the nearby and timezone lookups keep the exact point
 - `nearby` lists the nearest populated places (`nearbyLimit` 0–1,000, default 5, held to 50 per call with a notice when more lie within the radius; `radiusKm` up to 300, default 20; optional `cities` tier) or, when `featureClasses` / `featureCodes` is set, the nearest features of that type; `nearbyKind` says which. `featureClasses` and `featureCodes` intersect
+- When more than 50 lie within the radius, the notice prints the `geonames_search_places` call, with a `boundingBox` enclosing the radius, that lists them, up to the search's 5,100-row reach. The search returns rows by relevance, not distance, so read every page and keep the rows within `radiusKm`
 - Fails before any request with `conflicting_filters` (`cities` with a feature filter), `unknown_feature_code`, or `feature_filter_mismatch` (a code whose class is not listed, or a listed class with no code)
 - `includeTimezone` adds the IANA id, UTC offsets, local time, sunrise, and sunset (offsets only offshore, where both dates are reported at the standard offset)
 
@@ -98,12 +101,13 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, link
 - A listed country also returns the territories GeoNames files under it (`GB` also returns IM, JE, and GG), each postal code under its own `countryCode`; the notice names any country on the page that `countries` does not list
 - `limit` 1–1,000 (default 10), held to 100 per call with a notice when more remain; `code` and `place_name` page with `offset` 0–5000 and return `nextOffset` while more rows remain below offset 5000; GeoNames reports no total, so `truncated` says whether more rows exist, never how many
 - Covers 122 countries; Ireland returns only Eircode routing keys and Malta only letter prefixes
+- Admin codes on postal rows come from the postal dataset and can differ from the gazetteer's (Bavaria is `BY` here, `02` in search), so they are not `geonames_search_places` filters
 
 ---
 
 ### `geonames_get_countries` <sub>tool</sub>
 
-- Up to 250 `countries` by ISO alpha-2, alpha-3, or numeric code, a `continent`, `nameContains`, or no filter for all 250; `limit` 1–1,000 (default 50), held to 250 per call, with `offset`
+- Up to 250 `countries` by ISO alpha-2, alpha-3, or numeric code, a `continent`, `nameContains`, or no filter for all 250; `limit` 1–1,000 (default 50), held to 250 per call, with `offset`; a `nameContains` with no letter or digit fails before any request as `name_contains_unsearchable`
 - Rows carry ISO and FIPS codes, `geonameId` (the starting point for `geonames_get_children`), capital, population, area, continent, languages, currency, postal-code format, and mainland bounding box; unknown codes land in `notFound`
 
 ---
@@ -111,7 +115,7 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, link
 ### `geonames_list_reference` <sub>tool</sub>
 
 - `topic`: `feature_classes` (9), `feature_codes` (684, filterable by `featureClass`), or `postal_countries` (122, with each country's code range and count); `featureClass` with another topic fails as `filter_not_applicable`
-- `nameContains`, `limit` 1–1,000 (default 100, held to 700 per call, which fits every topic), and `offset`; feature classes and codes are bundled and spend no credits
+- `nameContains`, `limit` 1–1,000 (default 100, held to 700 per call, which fits every topic), and `offset`; feature classes and codes are bundled and spend no credits. A `nameContains` with no letter or digit fails before any request as `name_contains_unsearchable`
 
 ## Features
 
@@ -133,134 +137,50 @@ Agent-friendly output:
 Known limitations:
 
 - **Shared quota on a shared deployment.** All callers without their own username share the server account's 1,000 credits an hour. A burst of reverse geocodes (up to 7 credits each) can exhaust it, and GeoNames does not say when the window resets.
-- **Search and postal searches reach only offset 5000** on the free tier, and a page holds at most 100 rows, so a result set is reachable up to its 5,100th row. Nearby postal lookups do not page.
+- **Search and postal searches reach only offset 5000** on the free tier, and a page holds at most 100 rows, so a result set is reachable up to its 5,100th row. Nearby postal lookups do not page: they return the nearest 100, which in a dense city covers little ground (0.19 km in central London).
 - **Children cap at 1,000 per parent.**
 - **Postal data covers 122 countries.** Ireland and Malta return only code prefixes. US nearby lookups place the first row at the query point rather than the ZIP centroid.
 - **Nearby radius tops out at 300 km** for places and features and 30 km for postal codes, GeoNames' free-tier ceilings.
 - **Bounding boxes cannot cross the 180° meridian.** Split such an area into two searches.
 - **Coastal points can resolve to the ocean without a buffer.** By default only a country that contains the point matches, so a harbor or shoreline point just outside the outline returns the sea while its nearby places are on land. Set `coastalBufferKm` (up to 50) to match the nearest country instead; in a strait that can be either shore.
 - **Microstates and enclaves can resolve to the surrounding country.** A point inside Vatican City returns Italy.
-- **Nearest populated places include sections and historical places.** In a dense city the nearest rows are often `PPLX` quarters or `PPLH` former districts; each row's `featureCode` says which, and `cities` restricts to places above a population tier.
+- **Nearest populated places include sections and historical places.** In a dense city the nearest rows are often `PPLX` quarters or `PPLH` former districts; each row's `featureCode` says which. `cities` restricts to places above a population tier, but a city section (`PPLX`) with its own population passes it.
 - **Offshore timezones are offsets only.** No IANA id, local time, sunrise, or sunset is available at sea, and both dated offsets are the standard offset (open water has no DST).
+- **A place record's timezone is GeoNames' association, not a lookup at its coordinates.** On a record with no country it can be far off (South Pacific Ocean carries Pacific/Tongatapu, +13), and a country-bearing record can still carry another country's zone, as some Antarctic seas do. `geonames_reverse_geocode` with `includeTimezone` gives the time at a point.
 - **`exact_name` matches alternate and historical names**, so a result's `name` can differ from the query: "Springfield" can return Plattsburg or Palmyra, MO.
 - **Data is community-edited and provided "as is".** Many features have no recorded population or elevation.
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the hosted instance, no install:
 
-A public instance is available at `https://geonames.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "geonames-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://geonames.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http geonames-mcp-server https://geonames.caseyjhand.com/mcp
 ```
 
 A call that passes no `geonamesUsername` spends the hosted instance's GeoNames account, whose 1,000 credits an hour are shared by every such caller. Pass your own `geonamesUsername` to spend your account's quota instead.
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file, with your GeoNames username in place of the placeholder.
-
-```json
-{
-  "mcpServers": {
-    "geonames-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/geonames-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info",
-        "GEONAMES_USERNAME": "your_geonames_username"
-      }
-    }
-  }
-}
+```sh
+claude mcp add geonames-mcp-server -e GEONAMES_USERNAME=your_geonames_username -- npx -y @cyanheads/geonames-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "geonames-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/geonames-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info",
-        "GEONAMES_USERNAME": "your_geonames_username"
-      }
+      "args": ["-y", "@cyanheads/geonames-mcp-server"],
+      "env": { "GEONAMES_USERNAME": "your_geonames_username" }
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "geonames-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "MCP_TRANSPORT_TYPE=stdio",
-        "-e", "GEONAMES_USERNAME=your_geonames_username",
-        "ghcr.io/cyanheads/geonames-mcp-server:latest"
-      ]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 GEONAMES_USERNAME=your_geonames_username bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- A free [GeoNames account](https://www.geonames.org/login) with free web services enabled on its [account page](https://www.geonames.org/manageaccount). GeoNames rejects calls from an account until they are enabled.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/geonames-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd geonames-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# edit .env and set GEONAMES_USERNAME
-```
+Create a free [GeoNames account](https://www.geonames.org/login), then enable free web services on its [account page](https://www.geonames.org/manageaccount); GeoNames rejects calls from an account until they are enabled. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -296,23 +216,43 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-- **Build and run the production version**:
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/geonames-mcp-server.git
+  cd geonames-mcp-server && bun install
+  cp .env.example .env   # set GEONAMES_USERNAME
+  ```
+
+- **Build and run:**
 
   ```sh
   # One-time build
   bun run rebuild
 
   # Run the built server
-  bun run start:http
-  # or
   bun run start:stdio
+  # or
+  bun run start:http   # listens at http://localhost:3010/mcp
   ```
 
-- **Run checks and tests**:
+- **Run checks and tests:**
+
   ```sh
-  bun run devcheck  # Lints, formats, type-checks, and more
-  bun run test      # Runs the test suite
+  bun run devcheck   # Lint, format, typecheck, security
+  bun run test       # Vitest test suite
+  bun run lint:mcp   # Validate MCP definitions against spec
   ```
+
+### Docker
+
+```sh
+docker run --rm -e GEONAMES_USERNAME=your_geonames_username -p 3010:3010 ghcr.io/cyanheads/geonames-mcp-server:latest
+```
+
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/geonames-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "-e", "GEONAMES_USERNAME=your_geonames_username", "ghcr.io/cyanheads/geonames-mcp-server:latest"]`. To build locally, `docker build -t geonames-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 

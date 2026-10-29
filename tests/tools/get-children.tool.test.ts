@@ -569,7 +569,7 @@ describe('a limit above the 500 cap', () => {
     serve(EMPTY_GEONAMES_BODY);
     const leaf = page(await run({ geonameId: US, limit: 1000 }));
     expect(leaf.notice).toBe(
-      'This feature has no children in the administrative tree. Try hierarchy tourism or dependency, or search inside it with geonames_search_places and a boundingBox.',
+      "This feature has no children in the administrative tree. Try hierarchy tourism or dependency, or search inside it with geonames_search_places: an admin division by its country in countries and its admin codes (adminLevels of geonames_get_place), which match exactly, and a place that is not a division with a boundingBox. If the admin-code search returns only the division itself, GeoNames files nothing else under that code: search the division's boundingBox (geonames_get_place) instead, which also takes in neighboring areas.",
     );
     serve(childrenBody(853));
     const none = page(await run({ geonameId: US, nameContains: 'zzzqq', limit: 1000 }));
@@ -595,7 +595,7 @@ describe('a limit above the 500 cap', () => {
       shown: 500,
       nextOffset: 500,
     });
-    const notice = `These are the same children as the administrative tree's. GeoNames answers with the administrative children when a feature has no tourism tree, so this feature most likely has none; a real tourism tree can also match its administrative children. ${CLAMP(700)} 100 more children; call again with offset 500. GeoNames lists 1,500 children but returns at most 1,000 per parent; narrow with geonames_search_places using featureCodes and a boundingBox.`;
+    const notice = `These are the same children as the administrative tree's. GeoNames answers with the administrative children when a feature has no tourism tree, so this feature most likely has none; a real tourism tree can also match its administrative children. ${CLAMP(700)} 100 more children; call again with offset 500. GeoNames lists 1,500 children but returns at most 1,000 per parent; narrow with geonames_search_places using featureCodes, the parent's country in countries, and its admin codes (adminLevels of geonames_get_place).`;
     expect(page(result).notice).toBe(notice);
     const text = allText(result);
     expect(text.slice(text.lastIndexOf('\n'))).toBe(`\n> ${notice}`);
@@ -646,13 +646,46 @@ describe('nameContains', () => {
     );
     const text = allText(result);
     expect(text.slice(text.lastIndexOf('\n'))).toBe(
-      '\n> No child name contains "q\\[x\\](http\\[:\\]//e.test) &lt;b&gt;  ## Heading &gt; quote" among 6; call again without nameContains to browse them all.',
+      '\n> No child name contains "q\\[x\\](http://e.test) &lt;b&gt;  ## Heading &gt; quote" among 6; call again without nameContains to browse them all.',
     );
     expect(headingLines(text)).toEqual([
       `## GeoNames children of geonameId ${US} (administrative tree)`,
     ]);
     expect(text.split('\n').filter((line) => line.startsWith('>'))).toHaveLength(1);
     expect(text).not.toContain('<b>');
+  });
+
+  it.each(['!!!', '😀', '​'])(
+    'fails nameContains %j, which has no letter or digit, before any request',
+    async (nameContains) => {
+      const fetchFake = installService(
+        { childrenJSON: () => jsonResponse(CHILDREN_US_STATES_BODY) },
+        { server: false },
+      );
+      const result = await run({ geonameId: US, nameContains });
+      const error = expectDeclaredError(getChildrenTool, result, 'name_contains_unsearchable');
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data?.recovery).toEqual({
+        hint: 'Pass at least one letter or digit of the child name in nameContains, or omit nameContains to list every child.',
+      });
+      expect(allText(result)).toContain('Recovery: Pass at least one letter or digit');
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps filtering on the word beside punctuation', async () => {
+    serve();
+    expect(
+      page(await run({ geonameId: US, nameContains: 'oregon!' })).children.map(
+        (child) => child.name,
+      ),
+    ).toEqual(['Oregon']);
+  });
+
+  it('says nameContains needs a letter or digit', () => {
+    expect(getChildrenTool.input.shape.nameContains.description).toContain(
+      'at least one letter or digit',
+    );
   });
 });
 
@@ -677,9 +710,19 @@ describe('leaves and misses', () => {
       'no children in the administrative tree',
       'hierarchy tourism or dependency',
       'geonames_search_places',
-      'boundingBox',
+      'admin codes (adminLevels of geonames_get_place)',
+      'not a division with a boundingBox',
     ]);
     expect(result.notice).not.toContain('geography');
+  });
+
+  it('routes the search inside a division to its admin codes in the description, keeping the box for a place that is not one', () => {
+    expect(getChildrenTool.description).toContain(
+      'For other feature types inside a country or admin division, use geonames_search_places with its country in countries and its admin codes (adminLevels of geonames_get_place), which match exactly; a boundingBox also takes in neighboring areas, so keep it for a place that is not a division.',
+    );
+    expect(getChildrenTool.description).not.toContain(
+      'inside a place, use geonames_search_places with a boundingBox',
+    );
   });
 
   it('does not send a leaf in another tree to the administrative tree, which is empty too', async () => {
@@ -688,6 +731,7 @@ describe('leaves and misses', () => {
     expectInOrder(result.notice, [
       'no children in the dependency tree, nor in the administrative tree',
       'hierarchy tourism',
+      'admin codes (adminLevels of geonames_get_place)',
     ]);
     expect(result.notice).not.toContain('hierarchy administrative');
   });
@@ -1261,7 +1305,7 @@ describe('format()', () => {
     expect(headingLines(rendered)).toEqual([
       '## GeoNames children of geonameId 6252001 (administrative tree)',
     ]);
-    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
+    expect(rendered).toContain('\\[x\\](http://e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);
@@ -1358,13 +1402,12 @@ describe('declared error contracts', () => {
     expect(wire(result)).not.toContain(CALLER_USERNAME);
   });
 
-  it('keeps hostile GeoNames text in a rejection message to one inline line', async () => {
+  it('forwards GeoNames text in a rejection message on one line, with no markdown escapes', async () => {
     failing(14, 'bad\r\n## Heading [x](http://e.test) <b>');
     const error = errorOf(await run({ geonameId: US }));
-    expect(error.message).not.toMatch(/[\r\n]/);
-    expect(error.message).toContain('\\[x\\](http\\[:\\]//e.test)');
-    expect(error.message).toContain('&lt;b&gt;');
-    expect(error.message).not.toContain('<b>');
+    expect(error.message).toBe(
+      'GeoNames rejected a parameter: bad  ## Heading [x](http://e.test) <b>',
+    );
   });
 });
 

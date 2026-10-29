@@ -1027,6 +1027,105 @@ export const GET_MONACO_COUNTRY_BODY = {
   alternateNames: [],
 };
 
+/**
+ * `getJSON` for the South Pacific Ocean (4030483), as received (alternate names trimmed): no
+ * country keys at all, and a timezone (Pacific/Tongatapu, +13) that `timezoneJSON` at its own
+ * coordinates (-45, -130) does not share (no zone, -9).
+ */
+export const GET_SOUTH_PACIFIC_BODY = {
+  lng: '-130',
+  geonameId: 4030483,
+  timezone: {
+    gmtOffset: 13,
+    timeZoneId: 'Pacific/Tongatapu',
+    dstOffset: 13,
+    time: '2026-10-30 05:04',
+  },
+  bbox: {
+    east: -66.51908111572266,
+    south: -85.582763671875,
+    north: 1.984193921089172,
+    west: 131.0236358642578,
+    accuracyLevel: 0,
+  },
+  toponymName: 'South Pacific Ocean',
+  asciiName: 'South Pacific Ocean',
+  astergdem: -9999,
+  fcl: 'H',
+  population: 0,
+  wikipediaURL: 'en.wikipedia.org/wiki/South_Pacific_Ocean',
+  adminName5: '',
+  srtm3: -32768,
+  adminName4: '',
+  adminName3: '',
+  cc2: 'TO',
+  adminName2: '',
+  name: 'South Pacific Ocean',
+  fclName: 'stream, lake, ...',
+  fcodeName: 'ocean',
+  adminName1: '',
+  lat: '-45',
+  fcode: 'OCN',
+  alternateNames: [],
+};
+
+/**
+ * `getJSON` for Asia (6255147), with the fields `searchJSON` style FULL returned for it
+ * (alternate names trimmed): a continent code, no country, and Australia/Perth as its zone.
+ */
+export const GET_ASIA_BODY = {
+  lng: '89.29688',
+  geonameId: 6255147,
+  timezone: {
+    gmtOffset: 8,
+    timeZoneId: 'Australia/Perth',
+    dstOffset: 8,
+    time: '2026-10-30 00:04',
+  },
+  toponymName: 'Asia',
+  asciiName: 'Asia',
+  astergdem: 5115,
+  fcl: 'L',
+  population: 3812366000,
+  adminName5: '',
+  srtm3: 5101,
+  adminName4: '',
+  adminName3: '',
+  adminName2: '',
+  name: 'Asia',
+  fclName: 'parks,area, ...',
+  fcodeName: 'continent',
+  adminName1: '',
+  lat: '29.84064',
+  fcode: 'CONT',
+  continentCode: 'AS',
+  alternateNames: [],
+};
+
+/** `getJSON` for Earth (6295630), as received (alternate names trimmed): no country, no timezone. */
+export const GET_EARTH_BODY = {
+  lng: '0',
+  geonameId: 6295630,
+  toponymName: 'Earth',
+  asciiName: 'Earth',
+  astergdem: -9999,
+  fcl: 'L',
+  population: 6814400000,
+  wikipediaURL: 'en.wikipedia.org/wiki/Earth',
+  adminName5: '',
+  srtm3: -32768,
+  adminName4: '',
+  adminName3: '',
+  adminName2: '',
+  name: 'Earth',
+  fclName: 'parks,area, ...',
+  fcodeName: 'area',
+  adminName1: '',
+  lat: '0',
+  fcode: 'AREA',
+  alternateNames: [],
+};
+
 /** `timezoneJSON` for Sydney at 05:42 UTC on 2026-10-18, as received: AEDT on 1 January. */
 export const TIMEZONE_SYDNEY_BODY = {
   sunrise: '2026-10-18 06:10',

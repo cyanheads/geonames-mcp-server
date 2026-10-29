@@ -17,6 +17,7 @@ import { getHierarchyTool } from '@/mcp-server/tools/definitions/get-hierarchy.t
 import { getPlaceTool } from '@/mcp-server/tools/definitions/get-place.tool.js';
 import { searchPlacesTool } from '@/mcp-server/tools/definitions/search-places.tool.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
+import { readLine } from '../fixtures/commonmark.js';
 import {
   brokenStreamResponse,
   CALLER_USERNAME,
@@ -130,7 +131,7 @@ const CASES: ToolCase[] = [
     input: {},
     okBody: COUNTRY_TABLE_BODY,
     badRowBody: { geonames: [{ countryCode: 'XX' }] },
-    ownReasons: [],
+    ownReasons: ['name_contains_unsearchable'],
     call: (input, options) =>
       runToolContract(getCountriesTool, input as RunInput<typeof getCountriesTool>, options),
     direct: (input) => {
@@ -399,12 +400,24 @@ describe.each(CASES)('$name', (toolCase) => {
       expect(wire(result)).not.toContain(CALLER_USERNAME);
     });
 
-    it('upstream_rejected_parameter: forwards GeoNames text on one inert line', async () => {
-      installService(routes(failWith(14, 'bad\r\n## value [x](http://e.test) <b>')));
-      const error = errorOf(await call(input));
-      expect(error.message).toBe(
-        'GeoNames rejected a parameter: bad  ## value \\[x\\](http\\[:\\]//e.test) &lt;b&gt;',
+    it('upstream_rejected_parameter: forwards GeoNames text on one line, escaped only in content[]', async () => {
+      installService(
+        routes(
+          failWith(14, `bad\r\n## value [x](http://evil.test) <b>${String.fromCodePoint(0x202e)}`),
+        ),
       );
+      const result = await call(input);
+      const message = 'GeoNames rejected a parameter: bad  ## value [x](http://evil.test) <b>';
+      expect(errorOf(result).message).toBe(message);
+      const errorLine = allText(result)
+        .split('\n')
+        .find((line) => line.startsWith('Error: '));
+      expect(errorLine).toBeDefined();
+      expect(readLine(errorLine ?? '')).toMatchObject({
+        blocks: [],
+        live: [],
+        text: `Error: ${message}`,
+      });
     });
   });
 

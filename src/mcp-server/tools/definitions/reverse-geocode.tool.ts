@@ -41,6 +41,43 @@ const NEARBY_LIMIT_CEILING = 1000;
 /** GeoNames' free-tier ceiling on the nearby radius (status 24 beyond). */
 const MAX_RADIUS_KM = 300;
 
+/** Page size the full-page recipe asks geonames_search_places for: its per-call maximum. */
+const SEARCH_PAGE = 100;
+
+/** Mean Earth radius in km: the sphere the full-page recipe's box is drawn on. */
+const EARTH_RADIUS_KM = 6371;
+
+/**
+ * Factor on radiusKm for that box. GeoNames' nearby distances run up to 0.2% shorter than
+ * the haversine distance on this sphere (0.03% around Paris, 0.19% around Fiji), so an exact
+ * box can miss a row GeoNames places just inside the radius; 1% more keeps it in.
+ */
+const BOX_MARGIN = 1.01;
+
+const DEGREES = 180 / Math.PI;
+
+/** Rounds a bound outward to 4 decimals (about 11 m), so rounding never shrinks the box. */
+const ceil4 = (value: number) => Math.ceil(value * 1e4) / 1e4;
+const floor4 = (value: number) => Math.floor(value * 1e4) / 1e4;
+
+/**
+ * The geonames_search_places boundingBox enclosing radiusKm around a point. A circle that
+ * takes in a pole spans every longitude; one that crosses the 180° meridian has no single
+ * box search accepts (west below east), so it gets none.
+ */
+function radiusBox(lat: number, lng: number, radiusKm: number) {
+  const angle = (radiusKm * BOX_MARGIN) / EARTH_RADIUS_KM;
+  const north = Math.min(90, ceil4(lat + angle * DEGREES));
+  const south = Math.max(-90, floor4(lat - angle * DEGREES));
+  /** sin(longitude half-span) of a spherical cap; at 1 or more the cap holds a pole. */
+  const spanSine = Math.sin(angle) / Math.cos(lat / DEGREES);
+  if (spanSine >= 1) return { north, south, east: 180, west: -180 };
+  const span = Math.asin(spanSine) * DEGREES;
+  const east = ceil4(lng + span);
+  const west = floor4(lng - span);
+  return east > 180 || west < -180 ? undefined : { north, south, east, west };
+}
+
 /**
  * Ceiling on the containment buffer: room for harbors, estuaries, and the 12-nautical-mile
  * territorial sea, and well below the 300 km GeoNames rejects with status 24.
@@ -90,7 +127,7 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       "Radius in kilometres for the nearby lookup, above 0 and at most 300 (GeoNames' free-tier limit). Default 20.",
     ),
     cities: citiesInput.describe(
-      "Keep only nearby populated places with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. Not combinable with featureClasses or featureCodes.",
+      "Keep only nearby populated places with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. A city's sections (PPLX) with their own population pass too. Not combinable with featureClasses or featureCodes.",
     ),
     featureClasses: featureClassesInput.describe(
       'List the nearest features of these GeoNames classes instead of populated places: A admin divisions, H water, L areas, P populated places, R roads, S spots and buildings, T terrain, U undersea, V vegetation. With featureCodes too, the two lists intersect: list exactly the classes of those codes, or pass featureCodes alone. Not combinable with cities.',
@@ -280,7 +317,7 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
       .string()
       .optional()
       .describe(
-        'Guidance when the point is offshore or unmapped, its country was matched within coastalBufferKm, nothing is nearby, more lie within the radius than nearby holds (naming a nearbyLimit held to 50), or no IANA timezone covers it.',
+        'Guidance when the point is offshore or unmapped, its country was matched within coastalBufferKm, nothing is nearby, more lie within the radius than nearby holds (naming a nearbyLimit held to 50, and past 50 the geonames_search_places call that lists the rest), or no IANA timezone covers it.',
       ),
   },
   enrichmentTrailer: { notice: { render: renderNotice } },
@@ -472,11 +509,25 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
     if (nearbyRows.length > nearbyLimit) {
       ctx.enrich.truncated({ shown, cap: nearbyLimit });
       if (clamp.fragment !== undefined) fragments.push(clamp.fragment);
-      fragments.push(
-        nearbyLimit < MAX_NEARBY
-          ? `Only the nearest ${nearbyLimit} are listed, and more lie within ${radiusKm} km; raise nearbyLimit (max ${MAX_NEARBY}) to see them.`
-          : `Only the nearest ${MAX_NEARBY} are listed, ${clamp.fragment === undefined ? 'the most one call returns, ' : ''}and more lie within ${radiusKm} km; list the rest with geonames_search_places and a boundingBox.`,
-      );
+      if (nearbyLimit < MAX_NEARBY) {
+        fragments.push(
+          `Only the nearest ${nearbyLimit} are listed, and more lie within ${radiusKm} km; raise nearbyLimit (max ${MAX_NEARBY}) to see them.`,
+        );
+      } else {
+        /** The search filter that selects what this nearby lookup lists. */
+        const filter =
+          nearbyKind === 'features'
+            ? { featureClasses, featureCodes }
+            : { featureClasses: ['P'], cities };
+        const box = radiusBox(lat, lng, radiusKm);
+        const keep = `read every page (the search reaches its first 5,100 rows; split a box whose totalCount runs past that) and keep the rows whose lat and lng lie within ${radiusKm} km of this point`;
+        fragments.push(
+          `Only the nearest ${MAX_NEARBY} are listed, ${clamp.fragment === undefined ? 'the most one call returns, ' : ''}and more lie within ${radiusKm} km.`,
+          box === undefined
+            ? `To list them all, call geonames_search_places with ${JSON.stringify({ ...filter, limit: SEARCH_PAGE })} and a boundingBox on each side of the 180° meridian, which the radius crosses and one box cannot span; the search lists rows in relevance order, not by distance, so ${keep}.`
+            : `To list them all, call geonames_search_places with ${JSON.stringify({ ...filter, boundingBox: box, limit: SEARCH_PAGE })}: the box encloses the radius, but the search lists its rows in relevance order, not by distance, so ${keep}.`,
+        );
+      }
     }
     if (input.includeTimezone && timezone?.timezoneId === undefined) {
       fragments.push(

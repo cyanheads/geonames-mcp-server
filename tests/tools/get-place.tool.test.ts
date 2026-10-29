@@ -12,10 +12,13 @@ import { getPlaceTool } from '@/mcp-server/tools/definitions/get-place.tool.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import {
   CALLER_USERNAME,
+  GET_ASIA_BODY,
+  GET_EARTH_BODY,
   GET_LONDON_BODY,
   GET_MONACO_COUNTRY_BODY,
   GET_MONTE_CARLO_BODY,
   GET_SEATTLE_BODY,
+  GET_SOUTH_PACIFIC_BODY,
   GET_SPARSE_BODY,
   GET_UNITED_STATES_BODY,
   jsonResponse,
@@ -447,10 +450,24 @@ describe('the record', () => {
   it('describes the timezone offsets by date, not as standard and daylight time', () => {
     const timezone = getPlaceTool.output.shape.place.unwrap().shape.timezone.unwrap().shape;
     expect(timezone.gmtOffsetInHours.description).toBe(
-      'UTC offset in hours on 1 January of the current year at the place.',
+      'UTC offset in hours on 1 January of the current year in this zone.',
     );
     expect(timezone.dstOffsetInHours.description).toBe(
-      'UTC offset in hours on 1 July of the current year at the place.',
+      'UTC offset in hours on 1 July of the current year in this zone.',
+    );
+  });
+
+  it('says the linked postal codes can be fewer than geonames_find_postal_codes returns', () => {
+    const { postalCodes } = getPlaceTool.output.shape.place.unwrap().shape;
+    expect(postalCodes.description).toBe(
+      'Postal codes GeoNames links to this feature. The list can be shorter than what geonames_find_postal_codes returns for the place, so it is not the complete set.',
+    );
+  });
+
+  it("describes the timezone as GeoNames' association with the record, routing the time at a point to geonames_reverse_geocode", () => {
+    const { timezone } = getPlaceTool.output.shape.place.unwrap().shape;
+    expect(timezone.description).toBe(
+      'The timezone GeoNames associates with this record, not one looked up at its coordinates: on a feature with no country (an ocean, a sea, a continent) it can differ from the time there. For the time at a point, call geonames_reverse_geocode with includeTimezone. Absent when GeoNames sends none.',
     );
   });
 
@@ -527,6 +544,107 @@ describe('found: false', () => {
     await run({ geonameId: '5809844' });
     await run({ geonameId: 'https://sws.geonames.org/5809844/' });
     expect(fetchFake).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the timezone of a record without a country', () => {
+  const NOTICE = (point: string) =>
+    `GeoNames records no country for this feature, so its timezone is the zone GeoNames associates with the record, not the time at its coordinates or across its extent. For the time at a point, call geonames_reverse_geocode with ${point}.`;
+
+  /** The `> …` trailer lines of content[]. */
+  const trailer = (result: Awaited<ReturnType<typeof run>>) =>
+    allText(result)
+      .split('\n')
+      .filter((line) => line.startsWith('> '));
+
+  it('keeps the South Pacific Ocean zone as sent and qualifies it on both surfaces', async () => {
+    serve(GET_SOUTH_PACIFIC_BODY);
+    const result = await run({ geonameId: '4030483' });
+    const notice = NOTICE('{"lat":-45,"lng":-130,"includeTimezone":true,"nearbyLimit":0}');
+    expect(placeOf(result)).not.toHaveProperty('countryCode');
+    expect(placeOf(result).timezone).toEqual({
+      timezoneId: 'Pacific/Tongatapu',
+      gmtOffsetInHours: 13,
+      dstOffsetInHours: 13,
+    });
+    expect(successOf<Result & { notice?: string }>(result).notice).toBe(notice);
+    expect(trailer(result)).toEqual([`> ${notice}`]);
+    expect(textOf(result)).toContain(
+      '- **Timezone:** Pacific/Tongatapu (UTC offset 13 h on 1 January, 13 h on 1 July)\n',
+    );
+  });
+
+  it('qualifies a continent, which has a continent code but no country', async () => {
+    serve(GET_ASIA_BODY);
+    const result = await run({ geonameId: '6255147' });
+    expect(placeOf(result)).toMatchObject({
+      continentCode: 'AS',
+      timezone: { timezoneId: 'Australia/Perth' },
+    });
+    expect(successOf<{ notice?: string }>(result).notice).toBe(
+      NOTICE('{"lat":29.84064,"lng":89.29688,"includeTimezone":true,"nearbyLimit":0}'),
+    );
+  });
+
+  it('qualifies a zone with offsets only the same way', async () => {
+    serve({ ...GET_SOUTH_PACIFIC_BODY, timezone: { gmtOffset: -9 } });
+    const result = await run({ geonameId: '4030483' });
+    expect(placeOf(result).timezone).toEqual({ gmtOffsetInHours: -9 });
+    expect(successOf<{ notice?: string }>(result).notice).toBe(
+      NOTICE('{"lat":-45,"lng":-130,"includeTimezone":true,"nearbyLimit":0}'),
+    );
+  });
+
+  it('names the parameters without coordinates when the record has none', async () => {
+    const { lat: _lat, lng: _lng, ...noPoint } = GET_SOUTH_PACIFIC_BODY;
+    serve(noPoint);
+    const result = await run({ geonameId: '4030483' });
+    expect(placeOf(result)).not.toHaveProperty('lat');
+    expect(successOf<{ notice?: string }>(result).notice).toBe(
+      NOTICE('the lat and lng of that point and {"includeTimezone":true,"nearbyLimit":0}'),
+    );
+  });
+
+  it.each([
+    ['Earth, which has no country and no timezone', GET_EARTH_BODY, '6295630'],
+    ['a country-bearing place (Seattle, US)', GET_SEATTLE_BODY, '5809844'],
+    [
+      'country-bearing water carrying its coastal state zone (Aegean Sea, GR)',
+      {
+        ...GET_SOUTH_PACIFIC_BODY,
+        geonameId: 265695,
+        name: 'Aegean Sea',
+        toponymName: 'Aegean Sea',
+        asciiName: 'Aegean Sea',
+        fcode: 'SEA',
+        fcodeName: 'sea',
+        lat: '39',
+        lng: '25',
+        countryCode: 'GR',
+        countryName: 'Greece',
+        countryId: '390903',
+        continentCode: 'EU',
+        timezone: { gmtOffset: 2, timeZoneId: 'Europe/Athens', dstOffset: 3 },
+      },
+      '265695',
+    ],
+  ])('adds no notice for %s', async (_label, body, geonameId) => {
+    serve(body);
+    const result = await run({ geonameId });
+    expect(successOf<Result>(result).found).toBe(true);
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(trailer(result)).toEqual([]);
+  });
+
+  it('adds no notice to a miss', async () => {
+    serve(MISS_BODY, 404);
+    const result = await run({ geonameId: '4030483' });
+    expect(result.structuredContent).toEqual({
+      found: false,
+      guidance:
+        'No GeoNames feature has geonameId 4030483; it may have been deleted or merged. Find the place again with geonames_search_places.',
+    });
+    expect(trailer(result)).toEqual([]);
   });
 });
 
@@ -669,7 +787,7 @@ describe('format()', () => {
     ]);
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);
-    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
+    expect(rendered).toContain('\\[x\\](http://e.test)');
     expect(rendered.split('\n').filter((line) => line.startsWith('- injected'))).toEqual([]);
     expect(allText(result)).not.toMatch(/\r/);
   });
@@ -771,7 +889,7 @@ describe('format()', () => {
       }
     });
 
-    it('prints a URL held in a name so it does not render as a bare URL', async () => {
+    it('prints a URL held in a name as written, as structuredContent carries it', async () => {
       serve({
         ...GET_SEATTLE_BODY,
         name: 'Seattle https://example.com',
@@ -780,10 +898,8 @@ describe('format()', () => {
       const result = await run({ geonameId: '5809844' });
       expect(placeOf(result).name).toBe('Seattle https://example.com');
       const rendered = textOf(result);
-      expect(rendered).not.toContain('https://example.com');
-      expect(rendered).not.toContain('www.example.com');
-      expect(rendered).toContain('## Seattle https\\[:\\]//example.com');
-      expect(rendered).toContain('- **Toponym name:** Seattle www\\[.\\]example.com');
+      expect(rendered).toContain('## Seattle https://example.com\n');
+      expect(rendered).toContain('- **Toponym name:** Seattle www.example.com\n');
       expect(rendered).toContain('- **Wikipedia:** https://en.wikipedia.org/wiki/Seattle');
     });
   });

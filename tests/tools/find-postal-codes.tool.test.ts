@@ -207,6 +207,19 @@ describe('input normalization', () => {
     expectInOrder(findPostalCodesTool.description, ['page', 'offset', 'up to 5000']);
   });
 
+  it('says the admin codes of a postal row are the postal dataset codes, not search filters', () => {
+    const row = findPostalCodesTool.output.shape.postalCodes.element.shape;
+    expect(row.adminCode1.description).toBe(
+      "First-order admin division code (state, province) as the postal dataset records it, which can differ from the gazetteer code geonames_search_places filters on: DE 80331 carries BY here, where the gazetteer codes Bavaria 02. Not a geonames_search_places filter; for the gazetteer codes, call geonames_reverse_geocode at the row's lat and lng.",
+    );
+    for (const field of [row.adminCode2, row.adminCode3]) {
+      expectInOrder(field.description, [
+        'as the postal dataset records it',
+        'Not a geonames_search_places filter.',
+      ]);
+    }
+  });
+
   it('states the credit cost, including the coverage-list read a zero-hit lookup with countries adds', () => {
     expect(findPostalCodesTool.description).toContain(
       'Costs 1 GeoNames credit (2 for nearby); a code or place_name lookup with countries that returns nothing at offset 0 also reads the postal coverage list, 1 more credit unless that list is cached. Repeat lookups are cached.',
@@ -695,13 +708,13 @@ describe('notices', () => {
       expect(sent(fetchFake)).toContainEqual(['maxRows', '101']);
     });
 
-    it('at the maximum limit in mode nearby, says it is the most one call returns', async () => {
+    it('at the maximum limit in mode nearby, says it is the most one call returns and the lookup does not page', async () => {
       servePaged(101);
-      const result = page(await run({ mode: 'nearby', lat: 47.6, lng: -122.33, limit: 100 }));
-      expect(result).toMatchObject({ truncated: true, shown: 100, cap: 100 });
-      expect(result.notice).toBe(
-        'More postal codes lie within 10 km; 100 is the most one call returns, so query again from other points in the area to reach them.',
-      );
+      const result = await run({ mode: 'nearby', lat: 47.6, lng: -122.33, limit: 100 });
+      const notice =
+        'More postal codes lie within 10 km, but 100 is the most one call returns and the nearby lookup does not page, so the rest cannot be reached in order of distance; a call from another point returns the nearest 100 to that point.';
+      expect(page(result)).toMatchObject({ truncated: true, shown: 100, cap: 100, notice });
+      expect(quotedLines(allText(result))).toEqual([`> ${notice}`]);
     });
 
     it('at the maximum limit with exactly 100 rows, stays quiet', async () => {
@@ -847,7 +860,7 @@ describe('notices', () => {
       );
       const text = allText(hostile);
       const escaped =
-        '> No postal code matched "q\\[x\\](http\\[:\\]//e.test) &lt;b&gt;  ## Heading"; check the spelling of placeName.';
+        '> No postal code matched "q\\[x\\](http://e.test) &lt;b&gt;  ## Heading"; check the spelling of placeName.';
       expect(text).toContain(`\n${escaped}`);
       expect(text.split('\n')).toContain(escaped);
       expect(text).not.toContain('<b>');
@@ -1010,12 +1023,12 @@ describe('a limit above the 100 cap', () => {
   });
 
   it.each([101, 200, 1000])(
-    'mode nearby: limit %i names the clamp once and routes to other points, never to a larger limit',
+    'mode nearby: limit %i names the clamp once and says the lookup does not page, never routing to a larger limit',
     async (limit) => {
       const fetchFake = servePaged(150);
       const result = await run({ ...FIELDS.nearby, limit });
       expect(maxRows(fetchFake)).toEqual(['101']);
-      const notice = `${CLAMP(limit)} More postal codes lie within 10 km; query again from other points in the area to reach them.`;
+      const notice = `${CLAMP(limit)} More postal codes lie within 10 km, but the nearby lookup does not page, so the rest cannot be reached in order of distance; a call from another point returns the nearest 100 to that point.`;
       expect(page(result)).toMatchObject({ cap: 100, shown: 100, truncated: true, notice });
       expect(page(result)).not.toHaveProperty('nextOffset');
       expect(page(result).notice).not.toContain('most one call returns');
@@ -1622,7 +1635,7 @@ describe('format()', () => {
     expect(page(result).postalCodes[0]?.placeName).toBe(hostile);
     expect(tableRows(rendered)).toHaveLength(4);
     expect(headingLines(rendered)).toEqual(['## GeoNames postal codes (mode code)']);
-    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
+    expect(rendered).toContain('\\[x\\](http://e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).toContain('&lt;b&gt;x&lt;/b&gt;');
     expect(rendered).not.toContain('<img');
@@ -1734,13 +1747,12 @@ describe('declared error contracts', () => {
     expect(wire(result)).not.toContain(CALLER_USERNAME);
   });
 
-  it('keeps hostile GeoNames text in a rejection message to one inline line', async () => {
+  it('forwards GeoNames text in a rejection message on one line, with no markdown escapes', async () => {
     failing(14, 'bad\r\n## Heading [x](http://e.test) <b>');
     const error = errorOf(await run({ mode: 'code', postalCode: '98101' }));
-    expect(error.message).not.toMatch(/[\r\n]/);
-    expect(error.message).toContain('\\[x\\](http\\[:\\]//e.test)');
-    expect(error.message).toContain('&lt;b&gt;');
-    expect(error.message).not.toContain('<b>');
+    expect(error.message).toBe(
+      'GeoNames rejected a parameter: bad  ## Heading [x](http://e.test) <b>',
+    );
   });
 
   it('an unknown postal code is a result, not a status-17 error', async () => {

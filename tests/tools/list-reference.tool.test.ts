@@ -470,7 +470,7 @@ describe('feature_codes', () => {
     );
     const rendered = allText(result);
     expect(rendered.slice(rendered.lastIndexOf('\n'))).toBe(
-      '\n> Nothing in feature_codes matches "q\\[x\\](http\\[:\\]//e.test) &lt;b&gt; zzz ## Heading"; call again without nameContains.',
+      '\n> Nothing in feature_codes matches "q\\[x\\](http://e.test) &lt;b&gt; zzz ## Heading"; call again without nameContains.',
     );
     expect(rendered.split('\n').filter((line) => line.startsWith('#'))).toEqual([
       '## GeoNames feature codes (topic feature_codes)',
@@ -843,7 +843,7 @@ describe('format()', () => {
     expect(rendered.split('\n').filter((line) => line.startsWith('##'))).toEqual([
       '## GeoNames countries with postal-code data (topic postal_countries)',
     ]);
-    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
+    expect(rendered).toContain('\\[x\\](http://e.test)');
     expect(rendered).toContain('&lt;img src=x&gt;');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);
@@ -967,6 +967,41 @@ describe('declared error contracts', () => {
       },
     });
     expect(allText(result)).toContain('Recovery: Drop featureClass');
+  });
+
+  it.each(['feature_classes', 'postal_countries'])(
+    'name_contains_unsearchable: topic %s fails a nameContains with no letter or digit before any request',
+    async (topic) => {
+      useService(postalRoute(), { server: false });
+      const result = await run({ topic, nameContains: '😀' });
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toEqual({
+        reason: 'name_contains_unsearchable',
+        recovery: {
+          hint: 'Pass at least one letter or digit of the code, name, or description in nameContains, or omit nameContains to list every entry.',
+        },
+      });
+      expect(allText(result)).toContain('Recovery: Pass at least one letter or digit');
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps filtering on the words beside punctuation, and reads space characters alone as unset', async () => {
+    expect(
+      page(await run({ topic: 'feature_classes', nameContains: '!!! populated' })).entries.map(
+        (entry) => entry.code,
+      ),
+    ).toEqual(['P']);
+    for (const nameContains of [' ', '　']) {
+      expect(page(await run({ topic: 'feature_classes', nameContains })).totalCount).toBe(9);
+    }
+  });
+
+  it('says nameContains needs a letter or digit', () => {
+    expect(listReferenceTool.input.shape.nameContains.description).toContain(
+      'at least one letter or digit',
+    );
   });
 
   it('does not let a feature_* topic fail on account errors it never touches', async () => {

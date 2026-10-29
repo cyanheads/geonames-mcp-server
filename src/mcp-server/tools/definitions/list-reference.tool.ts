@@ -17,6 +17,7 @@ import {
   nameMatcher,
   offsetInput,
   paginate,
+  UNSEARCHABLE_NAME_MESSAGE,
   USERNAME_ALIASES,
 } from '@/mcp-server/tools/shared-inputs.js';
 import {
@@ -91,7 +92,7 @@ export const listReferenceTool = tool('geonames_list_reference', {
       'Topic feature_codes only: keep the codes of this one-letter class (A, H, L, P, R, S, T, U, V).',
     ),
     nameContains: nameContainsInput.describe(
-      'Keep only entries whose code, name, or description contains every word of this text as a substring (port also matches airport), ignoring case, accents, and punctuation.',
+      'Keep only entries whose code, name, or description contains every word of this text as a substring (port also matches airport), ignoring case, accents, and punctuation. Give at least one letter or digit.',
     ),
     limit: clampedLimitInput(MAX_LIMIT, 100),
     offset: offsetInput(),
@@ -171,6 +172,14 @@ export const listReferenceTool = tool('geonames_list_reference', {
       severity: 'notice',
     },
     {
+      reason: 'name_contains_unsearchable',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'nameContains is not blank but holds no letter or digit (only punctuation, symbols, emoji, or invisible characters), so it would match every entry.',
+      recovery:
+        'Pass at least one letter or digit of the code, name, or description in nameContains, or omit nameContains to list every entry.',
+      severity: 'notice',
+    },
+    {
       reason: 'username_required',
       code: JsonRpcErrorCode.Unauthorized,
       when: "Neither geonamesUsername nor the server's GEONAMES_USERNAME supplies a GeoNames account.",
@@ -225,6 +234,10 @@ export const listReferenceTool = tool('geonames_list_reference', {
         `featureClass applies only to topic feature_codes, not ${input.topic}.`,
       );
     }
+    const matcher = input.nameContains === undefined ? undefined : nameMatcher(input.nameContains);
+    if (input.nameContains !== undefined && matcher === undefined) {
+      throw ctx.fail('name_contains_unsearchable', UNSEARCHABLE_NAME_MESSAGE);
+    }
 
     let entries: readonly Entry[];
     switch (input.topic) {
@@ -251,7 +264,6 @@ export const listReferenceTool = tool('geonames_list_reference', {
       }
     }
 
-    const matcher = input.nameContains === undefined ? undefined : nameMatcher(input.nameContains);
     const matches = matcher
       ? entries.filter((entry) => matcher([entry.code, entry.name, entry.description]))
       : entries;

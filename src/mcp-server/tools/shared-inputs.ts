@@ -247,7 +247,7 @@ export const featureCodesInput = listInput(
 export const citiesInput = blankAsUnset(
   lowerCased(z.enum(['cities1000', 'cities5000', 'cities15000']).optional()),
 ).describe(
-  "Keep only populated places (class P) with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. Beside featureClasses or featureCodes, list only class P or class-P codes such as PPLC.",
+  "Keep only populated places (class P) with a population of at least 1,000 (cities1000), 5,000 (cities5000), or 15,000 (cities15000), plus seats of admin divisions: GeoNames' cities tiers. A city's sections (PPLX) with their own population pass too. Beside featureClasses or featureCodes, list only class P or class-P codes such as PPLC.",
 );
 
 /** Feature-filter entries GeoNames can never match, and the message naming them. */
@@ -339,8 +339,12 @@ export const lngInput = z
 
 /** Optional local name filter; see {@link nameMatcher}. */
 export const nameContainsInput = blankAsUnset(z.string().max(100).optional()).describe(
-  'Keep only entries whose name contains every word of this text as a substring (kansas also matches Arkansas), ignoring case, accents, and punctuation.',
+  'Keep only entries whose name contains every word of this text as a substring (kansas also matches Arkansas), ignoring case, accents, and punctuation. Give at least one letter or digit.',
 );
+
+/** The `name_contains_unsearchable` message: a nonblank `nameContains` with no letter or digit. */
+export const UNSEARCHABLE_NAME_MESSAGE =
+  'nameContains has no letter or digit. Names are matched on their letters and digits alone, so this text would match every entry.';
 
 /** The largest `limit` a clamped input accepts; anything above it fails validation as absurd. */
 const LIMIT_CEILING = 1000;
@@ -398,10 +402,15 @@ const normalizeForMatch = (value: string): string =>
 
 /**
  * Builds the strict token matcher behind `nameContains`: every word of `query` must
- * appear somewhere in the given fields.
+ * appear somewhere in the given fields. Returns `undefined` when `query` normalizes to no
+ * word (it holds no letter or digit), which would match everything; the tool rejects that
+ * as `name_contains_unsearchable` with {@link UNSEARCHABLE_NAME_MESSAGE}.
  */
-export function nameMatcher(query: string): (fields: readonly (string | undefined)[]) => boolean {
+export function nameMatcher(
+  query: string,
+): ((fields: readonly (string | undefined)[]) => boolean) | undefined {
   const tokens = normalizeForMatch(query).split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return;
   return (fields) => {
     const haystack = fields
       .filter((field) => field !== undefined)

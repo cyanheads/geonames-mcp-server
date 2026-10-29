@@ -236,6 +236,46 @@ describe('continent and name filters', () => {
     expect(codesOf(successOf<Page>(await run({ nameContains })))).toEqual(ALL);
   });
 
+  it.each(['!!!', '😀', '​'])(
+    'fails nameContains %j, which has no letter or digit, before any request',
+    async (nameContains) => {
+      const fetchFake = installService(
+        { countryInfoJSON: () => jsonResponse(COUNTRY_TABLE_BODY) },
+        { server: false },
+      );
+      const result = await run({ nameContains });
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toEqual({
+        reason: 'name_contains_unsearchable',
+        recovery: {
+          hint: 'Pass at least one letter or digit of the country name in nameContains, or omit nameContains to list every country.',
+        },
+      });
+      expect(error.message).toBe(
+        'nameContains has no letter or digit. Names are matched on their letters and digits alone, so this text would match every entry.',
+      );
+      expect(allText(result)).toContain('Recovery: Pass at least one letter or digit');
+      expect(fetchFake).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps matching a name whose punctuation sits beside a word, and a non-Latin miss is an empty page', async () => {
+    serve();
+    expect(codesOf(successOf<Page>(await run({ nameContains: '!!! germany' })))).toEqual(['DE']);
+    const miss = successOf<Page>(await run({ nameContains: '中国' }));
+    expect(miss.countries).toEqual([]);
+    expect(miss.notice).toBe(
+      'No country matched; call geonames_get_countries with no filters to list all 5.',
+    );
+  });
+
+  it('says nameContains needs a letter or digit', () => {
+    expect(getCountriesTool.input.shape.nameContains.description).toContain(
+      'at least one letter or digit',
+    );
+  });
+
   it('accepts a 100-character nameContains and rejects 101', async () => {
     serve();
     successOf<Page>(await run({ nameContains: 'a'.repeat(100) }));
@@ -787,7 +827,7 @@ describe('format()', () => {
     expect(successOf<Page>(result).countries[0]?.countryName).toBe(hostile);
     expect(tableRows(rendered)).toHaveLength(4);
     expect(headingLines(rendered)).toEqual(['## GeoNames countries']);
-    expect(rendered).toContain('\\[x\\](http\\[:\\]//e.test)');
+    expect(rendered).toContain('\\[x\\](http://e.test)');
     expect(rendered).not.toContain('<img');
     expect(rendered).not.toContain(bidi);
     const cells = (tableRows(rendered)[2] ?? '').replace(/\\\|/g, '').split('|');

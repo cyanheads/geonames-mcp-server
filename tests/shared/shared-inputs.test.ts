@@ -630,7 +630,18 @@ describe('nameContainsInput', () => {
 
   it('says each word matches as a substring', () => {
     expect(nameContainsInput.description).toContain('substring');
-    expect(nameMatcher('kansas')(['Arkansas'])).toBe(true);
+    expect(nameMatcher('kansas')?.(['Arkansas'])).toBe(true);
+  });
+
+  it('says the text needs a letter or digit', () => {
+    expect(nameContainsInput.description).toContain('at least one letter or digit');
+  });
+
+  it.each([
+    ['a no-break space', ' '],
+    ['an ideographic space', '　'],
+  ])('reads %s alone as unset, as trim() removes it', (_name, value) => {
+    expect(ok(nameContainsInput, value)).toBeUndefined();
   });
 });
 
@@ -713,9 +724,16 @@ describe('clampedLimitInput and clampLimit', () => {
   });
 });
 
+/** The matcher for a query that has words to match; fails the test when there are none. */
+function matcherFor(query: string) {
+  const matcher = nameMatcher(query);
+  if (matcher === undefined) throw new Error(`nameMatcher(${JSON.stringify(query)}) has no words`);
+  return matcher;
+}
+
 describe('nameMatcher', () => {
   it('requires every query word, in any order and across fields', () => {
-    const matches = nameMatcher('capital political');
+    const matches = matcherFor('capital political');
     expect(matches(['PPLC', 'capital of a political entity', undefined])).toBe(true);
     expect(matches(['political', 'capital'])).toBe(true);
     expect(matches(['PPLC', 'seat of a first-order division'])).toBe(false);
@@ -723,30 +741,57 @@ describe('nameMatcher', () => {
   });
 
   it('ignores case, accents, and punctuation on both sides', () => {
-    expect(nameMatcher('zurich')(['Zürich'])).toBe(true);
-    expect(nameMatcher('ZÜRICH')(['zurich'])).toBe(true);
-    expect(nameMatcher('saint etienne')(['Saint-Étienne'])).toBe(true);
-    expect(nameMatcher("o'brien")(["O'Brien Street"])).toBe(true);
-    expect(nameMatcher('st. louis')(['St Louis'])).toBe(true);
+    expect(matcherFor('zurich')(['Zürich'])).toBe(true);
+    expect(matcherFor('ZÜRICH')(['zurich'])).toBe(true);
+    expect(matcherFor('saint etienne')(['Saint-Étienne'])).toBe(true);
+    expect(matcherFor("o'brien")(["O'Brien Street"])).toBe(true);
+    expect(matcherFor('st. louis')(['St Louis'])).toBe(true);
+    expect(matcherFor('kansas!')(['Arkansas'])).toBe(true);
+    expect(matcherFor('!!! populated')(['P', 'populated place'])).toBe(true);
   });
 
   it('matches a word as a substring of a longer one', () => {
-    expect(nameMatcher('sea')(['Seattle'])).toBe(true);
+    expect(matcherFor('sea')(['Seattle'])).toBe(true);
   });
 
   it('skips undefined fields', () => {
-    expect(nameMatcher('x')([undefined, undefined])).toBe(false);
-    expect(nameMatcher('x')([undefined, 'x'])).toBe(true);
+    expect(matcherFor('x')([undefined, undefined])).toBe(false);
+    expect(matcherFor('x')([undefined, 'x'])).toBe(true);
   });
 
-  it('matches everything for a query with no words', () => {
-    expect(nameMatcher('   ')(['anything'])).toBe(true);
-    expect(nameMatcher('!!!')(['anything'])).toBe(true);
+  it.each([
+    ['!!!', '!!!'],
+    ['a hyphen', '-'],
+    ['an underscore', '_'],
+    ['a currency sign', '$'],
+    ['an ellipsis', '…'],
+    ['inverted marks', '¿¡'],
+    ['an emoji', '😀'],
+    ['a flag', '🇺🇸'],
+    ['two lone combining acutes', '́́'],
+    ['a zero-width space', '​'],
+    ['spaces alone', '   '],
+  ])('has no matcher for %s, which holds no letter or digit', (_name, query) => {
+    expect(nameMatcher(query)).toBeUndefined();
   });
 
-  it('keeps letters and digits from other scripts', () => {
-    expect(nameMatcher('東京')(['東京都'])).toBe(true);
-    expect(nameMatcher('東京')(['Kyoto'])).toBe(false);
+  it.each([
+    ['東京', '東京都'],
+    ['서울', '서울특별시'],
+    ['القاهرة', 'محافظة القاهرة'],
+    ['दिल्ली', 'नई दिल्ली'],
+    ['กรุงเทพ', 'กรุงเทพมหานคร'],
+    ['ガ', 'ガーナ'],
+  ])('matches %s in %s: letters of any script count', (query, name) => {
+    expect(matcherFor(query)([name])).toBe(true);
+    expect(matcherFor(query)(['Kyoto'])).toBe(false);
+  });
+
+  it('counts digits as text, a vulgar fraction as its digits', () => {
+    expect(matcherFor('123')(['Route 123'])).toBe(true);
+    expect(matcherFor('½')(['1 2'])).toBe(true);
+    expect(matcherFor('½')(['12'])).toBe(true);
+    expect(matcherFor('½')(['3'])).toBe(false);
   });
 });
 

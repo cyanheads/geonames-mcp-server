@@ -18,6 +18,7 @@ import {
   offsetInput,
   paginate,
   toAlpha2,
+  UNSEARCHABLE_NAME_MESSAGE,
   USERNAME_ALIASES,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
@@ -62,7 +63,7 @@ export const getCountriesTool = tool('geonames_get_countries', {
       'Keep only countries on this continent: AF Africa, AN Antarctica, AS Asia, EU Europe, NA North America, OC Oceania, SA South America.',
     ),
     nameContains: nameContainsInput.describe(
-      'Keep only countries whose English name contains every word of this text as a substring (niger also matches Nigeria), ignoring case, accents, and punctuation.',
+      'Keep only countries whose English name contains every word of this text as a substring (niger also matches Nigeria), ignoring case, accents, and punctuation. Give at least one letter or digit.',
     ),
     limit: clampedLimitInput(MAX_LIMIT, 50),
     offset: offsetInput(),
@@ -152,6 +153,14 @@ export const getCountriesTool = tool('geonames_get_countries', {
   },
   errors: [
     {
+      reason: 'name_contains_unsearchable',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'nameContains is not blank but holds no letter or digit (only punctuation, symbols, emoji, or invisible characters), so it would match every country.',
+      recovery:
+        'Pass at least one letter or digit of the country name in nameContains, or omit nameContains to list every country.',
+      severity: 'notice',
+    },
+    {
       reason: 'username_required',
       code: JsonRpcErrorCode.Unauthorized,
       when: "Neither geonamesUsername nor the server's GEONAMES_USERNAME supplies a GeoNames account.",
@@ -200,11 +209,14 @@ export const getCountriesTool = tool('geonames_get_countries', {
   async handler(input, ctx) {
     const limit = clampLimit(input.limit, MAX_LIMIT);
     ctx.enrich({ totalCount: 0, truncated: false, shown: 0, cap: limit.applied });
+    const matcher = input.nameContains === undefined ? undefined : nameMatcher(input.nameContains);
+    if (input.nameContains !== undefined && matcher === undefined) {
+      throw ctx.fail('name_contains_unsearchable', UNSEARCHABLE_NAME_MESSAGE);
+    }
     const service = getGeoNamesService();
     const table = await service.countries(service.resolveAccount(input.geonamesUsername), ctx);
 
     const codes = input.countries;
-    const matcher = input.nameContains === undefined ? undefined : nameMatcher(input.nameContains);
     const matches = table.filter(
       (country) =>
         (codes === undefined || codes.some((code) => hasCode(country, code))) &&

@@ -21,6 +21,7 @@ import {
   nameMatcher,
   offsetInput,
   paginate,
+  UNSEARCHABLE_NAME_MESSAGE,
   USERNAME_ALIASES,
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
@@ -77,7 +78,7 @@ const orNotAvailable = (value: string | undefined): string =>
 export const getChildrenTool = tool('geonames_get_children', {
   title: 'List GeoNames children',
   description:
-    "List the direct children of a GeoNames feature — Earth's continents, a continent's countries, a country's first-level divisions, a state's counties, a city's sections — in the administrative tree, or in the tourism tree (islands, coasts, and their municipalities; almost all in Spain) or the dependency tree (a country's dependent territories). Start from a country's geonameId (geonames_get_countries) or any admin division's. Children are mostly admin divisions (class A) and populated places (class P); continents and coasts are class L and islands class T. For other feature types inside a place, use geonames_search_places with a boundingBox. GeoNames answers a tourism or dependency request with the administrative children when the feature has no such tree, so the tool compares the two lists and sets sameAsAdministrative when they match, keeping the rows (a real tree can match too). The full child list is fetched once (1 GeoNames credit) and cached, so paging and nameContains filtering are free; a tourism or dependency call also reads the administrative list for the comparison, 1 more credit unless it is cached.",
+    "List the direct children of a GeoNames feature — Earth's continents, a continent's countries, a country's first-level divisions, a state's counties, a city's sections — in the administrative tree, or in the tourism tree (islands, coasts, and their municipalities; almost all in Spain) or the dependency tree (a country's dependent territories). Start from a country's geonameId (geonames_get_countries) or any admin division's. Children are mostly admin divisions (class A) and populated places (class P); continents and coasts are class L and islands class T. For other feature types inside a country or admin division, use geonames_search_places with its country in countries and its admin codes (adminLevels of geonames_get_place), which match exactly; a boundingBox also takes in neighboring areas, so keep it for a place that is not a division. GeoNames answers a tourism or dependency request with the administrative children when the feature has no such tree, so the tool compares the two lists and sets sameAsAdministrative when they match, keeping the rows (a real tree can match too). The full child list is fetched once (1 GeoNames credit) and cached, so paging and nameContains filtering are free; a tourism or dependency call also reads the administrative list for the comparison, 1 more credit unless it is cached.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     geonameId: geonameIdInput.describe(
@@ -87,7 +88,7 @@ export const getChildrenTool = tool('geonames_get_children', {
       "Which tree to descend: administrative (the default: continents (class L), countries, admin divisions, populated places), tourism (islands (class T), coasts (class L), and their municipalities; almost all in Spain), or dependency (a country's dependent territories). For a feature with no tourism or dependency tree, GeoNames answers with its administrative children, which sameAsAdministrative flags; the comparison reads the administrative list, 1 more credit unless it is cached.",
     ),
     nameContains: nameContainsInput.describe(
-      'Keep only children whose name or toponym name contains every word of this text as a substring (kansas also matches Arkansas), ignoring case, accents, and punctuation.',
+      'Keep only children whose name or toponym name contains every word of this text as a substring (kansas also matches Arkansas), ignoring case, accents, and punctuation. Give at least one letter or digit.',
     ),
     limit: clampedLimitInput(MAX_LIMIT, 100),
     offset: offsetInput(),
@@ -180,6 +181,14 @@ export const getChildrenTool = tool('geonames_get_children', {
   enrichmentTrailer: { notice: { render: renderNotice } },
   errors: [
     {
+      reason: 'name_contains_unsearchable',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'nameContains is not blank but holds no letter or digit (only punctuation, symbols, emoji, or invisible characters), so it would match every child.',
+      recovery:
+        'Pass at least one letter or digit of the child name in nameContains, or omit nameContains to list every child.',
+      severity: 'notice',
+    },
+    {
       reason: 'username_required',
       code: JsonRpcErrorCode.Unauthorized,
       when: "Neither geonamesUsername nor the server's GEONAMES_USERNAME supplies a GeoNames account.",
@@ -231,6 +240,10 @@ export const getChildrenTool = tool('geonames_get_children', {
     ctx.enrich({ truncated: false, shown: 0, cap: limit.applied });
     const { hierarchy } = input;
     const parentGeonameId = Number(input.geonameId);
+    const matcher = input.nameContains === undefined ? undefined : nameMatcher(input.nameContains);
+    if (input.nameContains !== undefined && matcher === undefined) {
+      throw ctx.fail('name_contains_unsearchable', UNSEARCHABLE_NAME_MESSAGE);
+    }
     const service = getGeoNamesService();
     const account = service.resolveAccount(input.geonamesUsername);
     const result = await service.children(input.geonameId, hierarchy, account, ctx);
@@ -252,7 +265,6 @@ export const getChildrenTool = tool('geonames_get_children', {
             result,
             await service.children(input.geonameId, 'administrative', account, ctx),
           );
-    const matcher = input.nameContains === undefined ? undefined : nameMatcher(input.nameContains);
     const matches = matcher ? all.filter((child) => matcher([child.name, child.toponymName])) : all;
     const { page, nextOffset } = paginate(matches, input.offset, limit.applied);
 
@@ -265,10 +277,12 @@ export const getChildrenTool = tool('geonames_get_children', {
       );
     }
     if (all.length === 0) {
+      const searchInside =
+        "search inside it with geonames_search_places: an admin division by its country in countries and its admin codes (adminLevels of geonames_get_place), which match exactly, and a place that is not a division with a boundingBox. If the admin-code search returns only the division itself, GeoNames files nothing else under that code: search the division's boundingBox (geonames_get_place) instead, which also takes in neighboring areas.";
       fragments.push(
         hierarchy === 'administrative'
-          ? 'This feature has no children in the administrative tree. Try hierarchy tourism or dependency, or search inside it with geonames_search_places and a boundingBox.'
-          : `This feature has no children in the ${hierarchy} tree, nor in the administrative tree: ${fallbackRule(hierarchy)}. Try hierarchy ${hierarchy === 'tourism' ? 'dependency' : 'tourism'}, or search inside it with geonames_search_places and a boundingBox.`,
+          ? `This feature has no children in the administrative tree. Try hierarchy tourism or dependency, or ${searchInside}`
+          : `This feature has no children in the ${hierarchy} tree, nor in the administrative tree: ${fallbackRule(hierarchy)}. Try hierarchy ${hierarchy === 'tourism' ? 'dependency' : 'tourism'}, or ${searchInside}`,
       );
     } else if (matches.length === 0 && input.nameContains !== undefined) {
       fragments.push(
@@ -289,7 +303,7 @@ export const getChildrenTool = tool('geonames_get_children', {
     }
     if (result.totalCount > all.length) {
       fragments.push(
-        `GeoNames lists ${result.totalCount.toLocaleString('en-US')} children but returns at most ${FETCH_CAP.toLocaleString('en-US')} per parent; narrow with geonames_search_places using featureCodes and a boundingBox.`,
+        `GeoNames lists ${result.totalCount.toLocaleString('en-US')} children but returns at most ${FETCH_CAP.toLocaleString('en-US')} per parent; narrow with geonames_search_places using featureCodes, the parent's country in countries, and its admin codes (adminLevels of geonames_get_place).`,
       );
     }
     if (fragments.length > 0) ctx.enrich.notice(fragments.join(' '));

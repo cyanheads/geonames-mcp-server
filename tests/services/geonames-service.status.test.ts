@@ -216,16 +216,29 @@ describe('status 14, 21, 24, 25, 27: rejected parameters', () => {
     expect(surfaces(error, ctx).toLowerCase()).not.toContain(CALLER_USERNAME);
   });
 
-  it('keeps forwarded text on one line and markdown-inert', async () => {
+  it('forwards the text on one line, invisible characters dropped, with no markdown escapes', async () => {
     const { error } = await searchFailure(() =>
       jsonResponse(
         statusEnvelope(14, `bad\r\nvalue [x](http://evil.test) <b>${String.fromCodePoint(0x202e)}`),
       ),
     );
     expect(error.message).toBe(
-      'GeoNames rejected a parameter: bad  value \\[x\\](http\\[:\\]//evil.test) &lt;b&gt;',
+      'GeoNames rejected a parameter: bad  value [x](http://evil.test) <b>',
     );
-    expect(error.message).not.toMatch(/[\r\n]/);
+  });
+
+  it('forwards a GeoNames URL as written', async () => {
+    const { error } = await searchFailure(() =>
+      jsonResponse(
+        statusEnvelope(
+          14,
+          'invalid parameter featureCode=[X] see https://www.geonames.org/export/',
+        ),
+      ),
+    );
+    expect(error.message).toBe(
+      'GeoNames rejected a parameter: invalid parameter featureCode=[X] see https://www.geonames.org/export/',
+    );
   });
 });
 

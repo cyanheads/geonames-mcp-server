@@ -15,7 +15,7 @@ import {
 } from '@/mcp-server/tools/shared-inputs.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import { type ExternalIdentifier, IDENTIFIER_TYPES } from '@/services/geonames/types.js';
-import { blockStartText, inlineText, plainUrl } from '@/utils/inline-text.js';
+import { blockStartText, inlineText, plainUrl, renderNotice } from '@/utils/inline-text.js';
 
 const IDENTIFIER_LABELS: Record<ExternalIdentifier['type'], string> = {
   iata: 'IATA',
@@ -146,14 +146,16 @@ export const getPlaceTool = tool('geonames_get_place', {
             gmtOffsetInHours: z
               .number()
               .optional()
-              .describe('UTC offset in hours on 1 January of the current year at the place.'),
+              .describe('UTC offset in hours on 1 January of the current year in this zone.'),
             dstOffsetInHours: z
               .number()
               .optional()
-              .describe('UTC offset in hours on 1 July of the current year at the place.'),
+              .describe('UTC offset in hours on 1 July of the current year in this zone.'),
           })
           .optional()
-          .describe('Timezone of the place. Absent when GeoNames sends none.'),
+          .describe(
+            'The timezone GeoNames associates with this record, not one looked up at its coordinates: on a feature with no country (an ocean, a sea, a continent) it can differ from the time there. For the time at a point, call geonames_reverse_geocode with includeTimezone. Absent when GeoNames sends none.',
+          ),
         boundingBox: z
           .object({
             north: z.number().describe('Northern latitude bound, decimal degrees.'),
@@ -192,7 +194,9 @@ export const getPlaceTool = tool('geonames_get_place', {
           .describe('Names in other languages and forms, filtered by nameLanguages when given.'),
         postalCodes: z
           .array(z.string().describe('A postal code.'))
-          .describe('Postal codes GeoNames links to the place.'),
+          .describe(
+            'Postal codes GeoNames links to this feature. The list can be shorter than what geonames_find_postal_codes returns for the place, so it is not the complete set.',
+          ),
         links: z
           .array(z.string().describe('A URL.'))
           .describe('Web pages GeoNames links to the place, as received.'),
@@ -214,6 +218,15 @@ export const getPlaceTool = tool('geonames_get_place', {
       .optional()
       .describe('The full record; absent when found is false.'),
   }),
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Present when the record has no country but carries a timezone: says the zone is the one GeoNames associates with the record, and how to get the time at a point.',
+      ),
+  },
+  enrichmentTrailer: { notice: { render: renderNotice } },
   errors: [
     {
       reason: 'username_required',
@@ -273,6 +286,17 @@ export const getPlaceTool = tool('geonames_get_place', {
         found: false,
         guidance: `No GeoNames feature has geonameId ${input.geonameId}; it may have been deleted or merged. Find the place again with geonames_search_places.`,
       };
+    }
+    // A countryless record's zone has no jurisdiction behind it and often misstates the time there.
+    if (place.countryCode === undefined && place.timezone !== undefined) {
+      const timezoneOnly = { includeTimezone: true, nearbyLimit: 0 };
+      const point =
+        place.lat === undefined || place.lng === undefined
+          ? `the lat and lng of that point and ${JSON.stringify(timezoneOnly)}`
+          : JSON.stringify({ lat: place.lat, lng: place.lng, ...timezoneOnly });
+      ctx.enrich.notice(
+        `GeoNames records no country for this feature, so its timezone is the zone GeoNames associates with the record, not the time at its coordinates or across its extent. For the time at a point, call geonames_reverse_geocode with ${point}.`,
+      );
     }
     const ranges = input.nameLanguages;
     const alternateNames =

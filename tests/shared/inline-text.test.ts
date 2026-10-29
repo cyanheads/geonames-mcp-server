@@ -7,7 +7,14 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { blockStartText, inlineText, plainUrl, tableCell } from '@/utils/inline-text.js';
+import {
+  blockStartText,
+  inlineText,
+  plainUrl,
+  singleLineText,
+  tableCell,
+} from '@/utils/inline-text.js';
+import { readLine } from '../fixtures/commonmark.js';
 
 /** The character at a code point. */
 const cp = (codePoint: number) => String.fromCodePoint(codePoint);
@@ -86,27 +93,29 @@ describe('inlineText', () => {
   });
 
   it('escapes brackets so no link or reference forms', () => {
-    expect(inlineText('[click](http://evil.test)')).toBe('\\[click\\](http\\[:\\]//evil.test)');
-    expect(inlineText('[ref]: http://evil.test')).toBe('\\[ref\\]: http\\[:\\]//evil.test');
+    expect(inlineText('[click](http://evil.test)')).toBe('\\[click\\](http://evil.test)');
+    expect(inlineText('[ref]: http://evil.test')).toBe('\\[ref\\]: http://evil.test');
   });
 
   it.each([
-    ['https://example.com', 'https\\[:\\]//example.com'],
-    ['http://example.com/a?b=c', 'http\\[:\\]//example.com/a?b=c'],
-    ['HTTPS://Example.com', 'HTTPS\\[:\\]//Example.com'],
-    ['ftp://example.com', 'ftp\\[:\\]//example.com'],
-    ['www.example.com', 'www\\[.\\]example.com'],
-    ['WWW.Example.com', 'WWW\\[.\\]Example.com'],
-    ['_https://example.com', '\\_https\\[:\\]//example.com'],
-  ])('prints the bare URL %s so no renderer autolinks it', (url, expected) => {
-    expect(inlineText(`Visit ${url} now`)).toBe(`Visit ${expected} now`);
+    'https://example.com',
+    'http://example.com/a?b=c',
+    'HTTPS://Example.com',
+    'ftp://example.com',
+    'www.example.com',
+    'WWW.Example.com',
+  ])('prints the bare URL %s as written', (url) => {
+    expect(inlineText(`Visit ${url} now`)).toBe(`Visit ${url} now`);
+    expect(inlineText(url)).toBe(url);
   });
 
-  it('prints a URL split by invisible characters so it does not autolink once they are gone', () => {
-    expect(inlineText(`https${ZWSP}://ex${cp(0xe0041)}ample.com`)).toBe(
-      'https\\[:\\]//example.com',
-    );
-    expect(inlineText(`www${cp(0x2060)}.example.com`)).toBe('www\\[.\\]example.com');
+  it('escapes only the leading underscore of _https://example.com', () => {
+    expect(inlineText('_https://example.com')).toBe('\\_https://example.com');
+  });
+
+  it('joins a URL split by invisible characters back to the URL as written', () => {
+    expect(inlineText(`https${ZWSP}://ex${cp(0xe0041)}ample.com`)).toBe('https://example.com');
+    expect(inlineText(`www${cp(0x2060)}.example.com`)).toBe('www.example.com');
   });
 
   it('escapes the ampersand of a character reference, so a reference cannot spell a URL', () => {
@@ -129,7 +138,7 @@ describe('inlineText', () => {
 
   it('turns angle brackets into entities', () => {
     expect(inlineText('<script>alert(1)</script>')).toBe('&lt;script&gt;alert(1)&lt;/script&gt;');
-    expect(inlineText('<https://evil.test>')).toBe('&lt;https\\[:\\]//evil.test&gt;');
+    expect(inlineText('<https://evil.test>')).toBe('&lt;https://evil.test&gt;');
   });
 
   it('handles every rule together', () => {
@@ -397,7 +406,7 @@ describe('plainUrl', () => {
     ['javascript:alert(1)', 'javascript:alert(1)'],
     ['JavaScript:alert(1)', 'JavaScript:alert(1)'],
     ['data:text/html,<b>x</b>', 'data:text/html,&lt;b&gt;x&lt;/b&gt;'],
-    ['ftp://example.test/a', 'ftp\\[:\\]//example.test/a'],
+    ['ftp://example.test/a', 'ftp://example.test/a'],
     ['mailto:a@example.test', 'mailto:a@example.test'],
     ['file:///etc/passwd', 'file:///etc/passwd'],
   ])('prints %s as escaped text, never as a URL', (input, expected) => {
@@ -416,6 +425,101 @@ describe('plainUrl', () => {
   });
 });
 
+describe('singleLineText', () => {
+  it('flattens line breaks, drops invisible characters, and escapes nothing', () => {
+    expect(singleLineText(`bad\r\nvalue [x](http://evil.test) <b>${RLO}`)).toBe(
+      'bad  value [x](http://evil.test) <b>',
+    );
+    expect(singleLineText(`a${LINE_SEPARATOR}b\t*c*_d_${ZWSP}&#58;`)).toBe('a b *c*_d_&#58;');
+    expect(singleLineText(`a${cp(0x200c)}b`)).toBe(`a${cp(0x200c)}b`);
+  });
+});
+
+/** Strings whose rendered slots must read back as written: URLs, link syntax, delimiters, line-start markers. */
+const ROUND_TRIP_CORPUS = [
+  'https://example.com',
+  'http://example.com/a?b=c',
+  'HTTPS://Example.com',
+  'ftp://example.com',
+  'Visit https://example.com now',
+  'http://evil.test/a*b*c',
+  'https://en.wikipedia.org/wiki/Springfield,_Illinois',
+  'https://en.wikipedia.org/wiki/Paris_(Texas)',
+  '_https://example.com',
+  'www.example.com',
+  'WWW.Example.com',
+  'Visit www.example.com now',
+  'www.foo_bar_.com',
+  '[click](http://evil.test)',
+  '[ref]: http://evil.test',
+  '<https://evil.test>',
+  'https&#58;//example.com',
+  'mail foo@example.com',
+  '**North** _Fork_ `Creek` ~~Old~~',
+  'Binyamina-Giv`at `Ada',
+  '4. Wiener Gemeindebezirk',
+  'Route 4. North',
+  'W14_01',
+  'America/Los_Angeles',
+  'Ipanema _Nh_',
+  '\\*x',
+  '#####',
+  '#5 Mine',
+  'abc #',
+  '[Paris] <b>',
+  'AT&T',
+  'Trinidad & Tobago',
+  'a | b',
+  '東京都',
+  'Ḩaḑramawt',
+  '- dash lead',
+  '> quote lead',
+];
+
+describe('CommonMark round trip', () => {
+  it.each(ROUND_TRIP_CORPUS)('reads %j back as written after a bold label', (text) => {
+    expect(readLine(`**L:** ${inlineText(text)}`)).toMatchObject({
+      blocks: [],
+      live: ['strong_open', 'strong_close'],
+      text: `L: ${text}`,
+    });
+  });
+
+  it.each(
+    ROUND_TRIP_CORPUS.flatMap((text) =>
+      [
+        ['heading', '## ', 'heading_open'],
+        ['list item', '- ', 'bullet_list_open'],
+        ['block quote', '> ', 'blockquote_open'],
+      ].map(([slot, prefix, block]) => [slot, text, prefix, block] as const),
+    ),
+  )('reads back a %s holding %j as written', (_slot, text, prefix, block) => {
+    const parsed = readLine(`${prefix}${blockStartText(text)}`);
+    expect(parsed.blocks[0]).toBe(block);
+    expect(parsed.live).toEqual([]);
+    expect(parsed.text).toBe(text);
+  });
+
+  it.each(['[click](http://evil.test)', '<https://evil.test>', 'https&#58;//example.com'])(
+    'opens no link for %j under CommonMark, and none to another target under linkify',
+    (text) => {
+      expect(readLine(`**L:** ${inlineText(text)}`).links).toEqual([]);
+      for (const { href, text: shown } of readLine(`**L:** ${inlineText(text)}`, 'gfm').links) {
+        expect(href).toBe(shown);
+      }
+    },
+  );
+
+  it('links a bare URL under linkify only to the URL it prints', () => {
+    const { links } = readLine(
+      `**L:** ${inlineText('Visit https://example.com and www.example.com')}`,
+      'gfm',
+    );
+    expect(links).toContainEqual({ href: 'https://example.com', text: 'https://example.com' });
+    for (const { href, text } of links) expect([text, `http://${text}`]).toContain(href);
+  });
+});
+
 /** Repeats `unit` to exactly `length` characters. */
 const fill = (unit: string, length: number) =>
   unit.repeat(Math.ceil(length / unit.length)).slice(0, length);
@@ -430,6 +534,9 @@ const UNDERSCORE_AND_DELIMITER_SHAPES: Shape[] = [
   ['underscore openers and closers', (n) => fill(',_a_(', n)],
   ['delimiter runs', (n) => fill('*`~', n)],
   ['line breaks interleaved', (n) => `${fill('§1 x', n)}\ny`],
+  ['spaces before CRLF line breaks', (n) => fill('  \r\n', n)],
+  ['repeated URL schemes', (n) => fill('https://', n)],
+  ['repeated www prefixes', (n) => fill('www.', n)],
 ];
 
 const LINE_START_SHAPES: Shape[] = [
@@ -446,6 +553,7 @@ const LINE_START_SHAPES: Shape[] = [
 /** blockStartText runs inlineText first, so its suite bounds both. */
 describe.each<[string, (text: string) => string, Shape[]]>([
   ['blockStartText', blockStartText, [...UNDERSCORE_AND_DELIMITER_SHAPES, ...LINE_START_SHAPES]],
+  ['singleLineText', singleLineText, UNDERSCORE_AND_DELIMITER_SHAPES],
   ['plainUrl', (text) => plainUrl(`https://x.test/${text}`), UNDERSCORE_AND_DELIMITER_SHAPES],
 ])('%s cost', (_name, render, shapes) => {
   /** Shortest input, in characters, of each scaled shape. */

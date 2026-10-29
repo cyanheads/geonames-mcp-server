@@ -2,18 +2,17 @@
  * @fileoverview Markdown-safe rendering of upstream-authored and caller-echoed text.
  * GeoNames names, labels, and status text are community-edited, so `format()` and each
  * `enrichmentTrailer` render print them, and the caller text echoed beside them, only
- * through these helpers. Three mechanisms keep that text from opening a link, autolink,
- * HTML tag, emphasis, code span, strikethrough, or character reference, or a block where it
- * opens a line: a backslash before the markdown punctuation that would start one, `&lt;` and
- * `&gt;` for `<` and `>`, and brackets around a bare URL's trigger (`https[:]//`,
- * `www[.]`). The framework trailer prints enrichment verbatim, so a notice or
- * `effectiveQuery` reaches `structuredContent` raw and is escaped only by its render. An
- * error message is one string on both surfaces: the GeoNames text an
- * `upstream_rejected_parameter` message forwards goes through {@link inlineText} as the
- * message is composed, and the caller values other error messages echo are enum members,
- * codes, and numbers that the schema has already limited to characters markdown does not
- * read inside a line. Every other string reaches `structuredContent` as received, less the
- * Unicode tag characters the service drops when it decodes a response.
+ * through these helpers. Two mechanisms keep that text from opening a link, HTML tag,
+ * emphasis, code span, strikethrough, or character reference, or a block where it opens a
+ * line: a backslash before the markdown punctuation that would start one, and `&lt;` and
+ * `&gt;` for `<` and `>`. Both round-trip, so a CommonMark parse of the rendered slot reads
+ * back the text as written; a bare URL prints as written too. The framework trailer prints
+ * enrichment verbatim, so a notice or `effectiveQuery` reaches `structuredContent` raw and
+ * is escaped only by its render. An error message carries no markdown escapes, because the
+ * framework escapes the `content[]` `Error:` line itself: the GeoNames text an
+ * `upstream_rejected_parameter` message forwards goes through {@link singleLineText} alone.
+ * Every other string reaches `structuredContent` as received, less the Unicode tag
+ * characters the service drops when it decodes a response.
  *
  * A slot takes its helper by where the text stands in its line:
  * - after server-written text on the same line (a bold label's value, a value inside a
@@ -33,9 +32,6 @@ const LINE_BREAKS = /[\r\n\t\u{2028}\u{2029}]/gu;
  * names need to spell correctly.
  */
 const INVISIBLE = /(?![\u{200c}\u{200d}])[\p{Cc}\p{Cf}]/gu;
-
-/** The `:` of an http, https, or ftp URL and the `.` after `www`: where GFM starts an autolink. */
-const AUTOLINK_TRIGGER = /(?<=https?|ftp):(?=\/\/)|(?<=www)\./giu;
 
 /** An `&` that opens a named or numeric character reference, which renderers decode. */
 const CHARACTER_REFERENCE = /&(?=#\d+;|#x[\da-f]+;|[a-z][a-z\d]*;)/giu;
@@ -128,21 +124,27 @@ function encodeEmphasisUnderscores(url: string): string {
 }
 
 /**
+ * Text on one line with nothing invisible in it: line breaks become spaces, and control and
+ * format characters are dropped (ZWNJ and ZWJ stay). No markdown escapes, so the result is
+ * the text as written wherever the reader escapes it, as the framework does for an error
+ * message's `content[]` line.
+ */
+export function singleLineText(value: string): string {
+  return value.replace(LINE_BREAKS, ' ').replace(INVISIBLE, '');
+}
+
+/**
  * Renders text for a slot inside a line, after server-written text: a bold label's value
  * (`**Toponym name:** …`, and the `**effectiveQuery:** …` an `enrichmentTrailer` render
- * writes) or a value inside a composed sentence. Line breaks become spaces, control and
- * format characters are dropped, a bare URL's `://` or `www.` is bracketed
- * (`https[:]//`, `www[.]`) so no renderer autolinks it, backslash is escaped, then a
- * character reference's `&`, `[` `]`, `*`, `` ` ``, `~`, and every `_` not between two
- * letters, digits, or marks, and `<` / `>` become entities. A block opens only at the
- * start of a line, so `#`, `+`, `-`, ordinals, and spaces print as written (`#####`,
+ * writes) or a value inside a composed sentence. {@link singleLineText}, then backslash is
+ * escaped, then a character reference's `&`, `[` `]`, `*`, `` ` ``, `~`, and every `_` not
+ * between two letters, digits, or marks, and `<` / `>` become entities. A bare URL prints
+ * as written; `[label](url)` and `<url>` stay literal text. A block opens only at the start
+ * of a line, so `#`, `+`, `-`, ordinals, and spaces print as written (`#####`,
  * `4. Wiener Gemeindebezirk`).
  */
 export function inlineText(value: string): string {
-  return value
-    .replace(LINE_BREAKS, ' ')
-    .replace(INVISIBLE, '')
-    .replace(AUTOLINK_TRIGGER, '[$&]')
+  return singleLineText(value)
     .replace(/\\/g, '\\\\')
     .replace(CHARACTER_REFERENCE, '\\&')
     .replace(DELIMITERS, '\\$&')
