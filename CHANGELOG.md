@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-29
+
+Publishes the geonames-guide agent skill over MCP, prints the search call that lists a full nearby page, notes the timezone of countryless records, rejects nameContains with no letter or digit, and keeps URLs as written in content[].
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-10-18
 
 Over-cap limits are clamped with a notice, postal searches page with offset, a full page reports truncation only when more rows exist, enrichment text stays raw in structuredContent, search filters by admin code, and country filters reject codes GeoNames files nothing under.

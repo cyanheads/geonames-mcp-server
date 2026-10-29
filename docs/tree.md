@@ -1,6 +1,6 @@
 # geonames-mcp-server - Directory Structure
 
-Generated on: 2026-10-18 05:32:49
+Generated on: 2026-10-29 17:08:02
 
 ```text
 geonames-mcp-server/
@@ -25,6 +25,7 @@ geonames-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -36,6 +37,8 @@ geonames-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -133,6 +136,9 @@ geonames-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── geonames-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -163,6 +169,7 @@ geonames-mcp-server/
 │   └── index.ts
 ├── tests/
 │   ├── fixtures/
+│   │   ├── commonmark.ts
 │   │   ├── contract-assertions.ts
 │   │   ├── geonames-upstream-spatial.ts
 │   │   ├── geonames-upstream.ts
@@ -205,7 +212,9 @@ geonames-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
