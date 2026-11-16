@@ -1117,7 +1117,7 @@ describe('notices', () => {
   describe('the full-page route to geonames_search_places', () => {
     /** The geonames_search_places arguments a full-page notice prints. */
     const recipeOf = (notice: string | undefined) => {
-      const json = notice?.match(/call geonames_search_places with (\{.*\})(?=:| and )/)?.[1];
+      const json = notice?.match(/call geonames_search_places with (\{.*\})(?=:)/)?.[1];
       if (json === undefined) throw new Error(`no search arguments in: ${notice}`);
       return JSON.parse(json) as {
         boundingBox?: { east: number; north: number; south: number; west: number };
@@ -1177,9 +1177,9 @@ describe('notices', () => {
           page(await run({ lat, lng, radiusKm, nearbyLimit: 50 })).notice,
         );
         if (box === undefined) throw new Error('no box printed');
-        // Samples just past the radius; the 1% margin itself covers GeoNames' distances, up to 0.2% under the haversine.
+        // GeoNames' distances run up to 0.47% under the haversine, so a row it places at radiusKm can sit 0.47% farther out; sampling at 0.5% past the radius holds the box to that.
         for (let bearing = 0; bearing < 360; bearing += 0.5) {
-          const edge = destination(lat, lng, bearing, radiusKm * 1.0005);
+          const edge = destination(lat, lng, bearing, radiusKm * 1.005);
           expect(edge.lat).toBeLessThanOrEqual(box.north);
           expect(edge.lat).toBeGreaterThanOrEqual(box.south);
           expect(edge.lng).toBeLessThanOrEqual(box.east);
@@ -1188,6 +1188,42 @@ describe('notices', () => {
         expect([box.north, box.south, box.east, box.west].every(Number.isFinite)).toBe(true);
         expect(box.south).toBeLessThan(box.north);
         expect(box.west).toBeLessThan(box.east);
+      },
+    );
+
+    it.each([
+      [0, 179.95, 20],
+      [-17.8, -179.9, 20],
+      [65, 179.7, 20],
+      [-17.8, 179.9, 100],
+      [65, 179.7, 300],
+      [0, -179.99, 300],
+      [86.6, 179, 300],
+      [0, 180, 20],
+      [0, -180, 20],
+    ])(
+      'prints one box at %f, %f (%f km) whose west lies above east, enclosing the radius read across the 180° meridian',
+      async (lat, lng, radiusKm) => {
+        serve({ places: nearest(51) });
+        const { boundingBox: box } = recipeOf(
+          page(await run({ lat, lng, radiusKm, nearbyLimit: 50 })).notice,
+        );
+        if (box === undefined) throw new Error('no box printed');
+        // The same 0.5% past the radius as above, longitude read across the meridian.
+        for (let bearing = 0; bearing < 360; bearing += 0.5) {
+          const edge = destination(lat, lng, bearing, radiusKm * 1.005);
+          expect(edge.lat).toBeLessThanOrEqual(box.north);
+          expect(edge.lat).toBeGreaterThanOrEqual(box.south);
+          expect(edge.lng >= box.west || edge.lng <= box.east).toBe(true);
+        }
+        expect(box.south).toBeLessThan(box.north);
+        expect(box.west).toBeGreaterThan(box.east);
+        for (const bound of [box.east, box.west]) {
+          expect(Math.abs(bound)).toBeLessThan(180);
+        }
+        for (const bound of [box.north, box.south, box.east, box.west]) {
+          expect(String(bound)).toMatch(/^-?\d+(\.\d{1,4})?$/);
+        }
       },
     );
 
@@ -1211,6 +1247,7 @@ describe('notices', () => {
         { lat: 46.55, lng: 8, featureClasses: 'T', featureCodes: 'MT' },
       ],
       ['the North Pole', { lat: 89.9, lng: 0 }],
+      ['the 180° meridian', { lat: -17.8, lng: 179.9, radiusKm: 100 }],
     ])(
       'prints arguments geonames_search_places takes as they stand, sending the box (%s)',
       async (_label, point) => {
@@ -1229,18 +1266,64 @@ describe('notices', () => {
     );
 
     it.each([
-      [0, 179.95],
-      [-17.8, -179.9],
-      [65, 179.7],
+      [
+        0,
+        179.95,
+        20,
+        '{"featureClasses":["P"],"boundingBox":{"north":0.1817,"south":-0.1817,"east":-179.8683,"west":179.7683},"limit":100}',
+      ],
+      [
+        -17.8,
+        -179.9,
+        20,
+        '{"featureClasses":["P"],"boundingBox":{"north":-17.6183,"south":-17.9817,"east":-179.7092,"west":179.9092},"limit":100}',
+      ],
+      [
+        65,
+        179.7,
+        20,
+        '{"featureClasses":["P"],"boundingBox":{"north":65.1817,"south":64.8183,"east":-179.8701,"west":179.2701},"limit":100}',
+      ],
+      [
+        -17.8,
+        179.9,
+        100,
+        '{"featureClasses":["P"],"boundingBox":{"north":-16.8916,"south":-18.7084,"east":-179.146,"west":178.946},"limit":100}',
+      ],
+      [
+        -17.8,
+        -179.9,
+        100,
+        '{"featureClasses":["P"],"boundingBox":{"north":-16.8916,"south":-18.7084,"east":-178.946,"west":179.146},"limit":100}',
+      ],
+      // Rounded before wrapping, these bounds would print as ±127.71459999999999.
+      [
+        86.6,
+        179,
+        300,
+        '{"featureClasses":["P"],"boundingBox":{"north":89.325,"south":83.875,"east":-127.7146,"west":125.7146},"limit":100}',
+      ],
+      [
+        86.6,
+        -179,
+        300,
+        '{"featureClasses":["P"],"boundingBox":{"north":89.325,"south":83.875,"east":-125.7146,"west":127.7146},"limit":100}',
+      ],
     ])(
-      'prints no box when the radius around %f, %f crosses the 180° meridian, and says to split it',
-      async (lat, lng) => {
+      'prints the box around %f, %f (%f km) that crosses the 180° meridian in the single-box sentence',
+      async (lat, lng, radiusKm, args) => {
         serve({ places: nearest(51) });
-        const result = page(await run({ lat, lng, nearbyLimit: 50 }));
-        expect(result.notice).toBe(
-          'Only the nearest 50 are listed, the most one call returns, and more lie within 20 km. To list them all, call geonames_search_places with {"featureClasses":["P"],"limit":100} and a boundingBox on each side of the 180° meridian, which the radius crosses and one box cannot span; the search lists rows in relevance order, not by distance, so read every page (the search reaches its first 5,100 rows; split a box whose totalCount runs past that) and keep the rows whose lat and lng lie within 20 km of this point.',
+        const result = await run({ lat, lng, radiusKm, nearbyLimit: 50 });
+        const notice = `Only the nearest 50 are listed, the most one call returns, and more lie within ${radiusKm} km. To list them all, call geonames_search_places with ${args}: the box encloses the radius, but the search lists its rows in relevance order, not by distance, so read every page (the search reaches its first 5,100 rows; split a box whose totalCount runs past that) and keep the rows whose lat and lng lie within ${radiusKm} km of this point.`;
+        expect(page(result)).toMatchObject({ truncated: true, shown: 50, cap: 50, notice });
+        const text = allText(result);
+        expect(text.slice(text.lastIndexOf('\n'))).toBe(
+          `\n> ${notice.replaceAll('[', '\\[').replaceAll(']', '\\]')}`,
         );
-        expect(recipeOf(result.notice)).not.toHaveProperty('boundingBox');
+        expect(readLine(text.slice(text.lastIndexOf('\n') + 1))).toMatchObject({
+          live: [],
+          text: notice,
+        });
       },
     );
 

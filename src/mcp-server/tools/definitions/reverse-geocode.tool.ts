@@ -48,9 +48,10 @@ const SEARCH_PAGE = 100;
 const EARTH_RADIUS_KM = 6371;
 
 /**
- * Factor on radiusKm for that box. GeoNames' nearby distances run up to 0.2% shorter than
- * the haversine distance on this sphere (0.03% around Paris, 0.19% around Fiji), so an exact
- * box can miss a row GeoNames places just inside the radius; 1% more keeps it in.
+ * Factor on radiusKm for that box. Over the 500 nearest populated places to (-17.8, 179.9),
+ * GeoNames' nearby distances ran from 0.47% shorter (rows due north) to 0.14% longer (rows
+ * due east) than the haversine distance on this sphere, so an exact box can miss a row
+ * GeoNames places just inside the radius; 1% more keeps it in.
  */
 const BOX_MARGIN = 1.01;
 
@@ -62,8 +63,10 @@ const floor4 = (value: number) => Math.floor(value * 1e4) / 1e4;
 
 /**
  * The geonames_search_places boundingBox enclosing radiusKm around a point. A circle that
- * takes in a pole spans every longitude; one that crosses the 180° meridian has no single
- * box search accepts (west below east), so it gets none.
+ * takes in a pole spans every longitude. One that crosses the 180° meridian gets a box whose
+ * west lies above east, which geonames_search_places and GeoNames read as crossing. The
+ * bound past ±180 wraps into range before it is rounded: rounded first, it can carry float
+ * residue (-127.71459999999999 for -127.7146).
  */
 function radiusBox(lat: number, lng: number, radiusKm: number) {
   const angle = (radiusKm * BOX_MARGIN) / EARTH_RADIUS_KM;
@@ -73,9 +76,14 @@ function radiusBox(lat: number, lng: number, radiusKm: number) {
   const spanSine = Math.sin(angle) / Math.cos(lat / DEGREES);
   if (spanSine >= 1) return { north, south, east: 180, west: -180 };
   const span = Math.asin(spanSine) * DEGREES;
-  const east = ceil4(lng + span);
-  const west = floor4(lng - span);
-  return east > 180 || west < -180 ? undefined : { north, south, east, west };
+  const east = lng + span;
+  const west = lng - span;
+  return {
+    north,
+    south,
+    east: ceil4(east > 180 ? east - 360 : east),
+    west: floor4(west < -180 ? west + 360 : west),
+  };
 }
 
 /**
@@ -519,13 +527,10 @@ export const reverseGeocodeTool = tool('geonames_reverse_geocode', {
           nearbyKind === 'features'
             ? { featureClasses, featureCodes }
             : { featureClasses: ['P'], cities };
-        const box = radiusBox(lat, lng, radiusKm);
-        const keep = `read every page (the search reaches its first 5,100 rows; split a box whose totalCount runs past that) and keep the rows whose lat and lng lie within ${radiusKm} km of this point`;
+        const args = { ...filter, boundingBox: radiusBox(lat, lng, radiusKm), limit: SEARCH_PAGE };
         fragments.push(
           `Only the nearest ${MAX_NEARBY} are listed, ${clamp.fragment === undefined ? 'the most one call returns, ' : ''}and more lie within ${radiusKm} km.`,
-          box === undefined
-            ? `To list them all, call geonames_search_places with ${JSON.stringify({ ...filter, limit: SEARCH_PAGE })} and a boundingBox on each side of the 180° meridian, which the radius crosses and one box cannot span; the search lists rows in relevance order, not by distance, so ${keep}.`
-            : `To list them all, call geonames_search_places with ${JSON.stringify({ ...filter, boundingBox: box, limit: SEARCH_PAGE })}: the box encloses the radius, but the search lists its rows in relevance order, not by distance, so ${keep}.`,
+          `To list them all, call geonames_search_places with ${JSON.stringify(args)}: the box encloses the radius, but the search lists its rows in relevance order, not by distance, so read every page (the search reaches its first 5,100 rows; split a box whose totalCount runs past that) and keep the rows whose lat and lng lie within ${radiusKm} km of this point.`,
         );
       }
     }
