@@ -4,6 +4,7 @@
  * → unexpected shape), then normalizes: string numbers parsed, and GeoNames'
  * absence placeholders (`population: 0`, `geonameId: 0`, `adminCode1: "00"` with no
  * admin id, `isoNumeric: "0"`, empty strings, the -32768/-9999 DEM sentinels) dropped. A
+ * bounding box's `east: -180` reads as `180` and `west: 180` as `-180`. A
  * country record lists no admin level. Timezone offsets on 1 January and 1 July come from
  * the IANA zone in the local year; offshore, both are `rawOffset`. Sunrise and sunset
  * are the pair on the local date.
@@ -90,6 +91,12 @@ const adminCode1 = (code: unknown, adminId: unknown): string | undefined => {
   return value === '00' && positive(adminId) === undefined ? undefined : value;
 };
 
+/**
+ * A bounding box, or nothing when a side fails to parse. West above east is a box that
+ * crosses the 180° meridian, kept as sent. A side GeoNames writes on the meridian from the
+ * far side (New Zealand's `east: -180`) is relayed as `east: 180` (and `west: 180` as
+ * `-180`), the same meridian, so such a box reads as ending there, not crossing it.
+ */
 function boundingBox(value: Record<string, unknown>): BoundingBox | undefined {
   const north = toNumber(value.north);
   const south = toNumber(value.south);
@@ -97,7 +104,7 @@ function boundingBox(value: Record<string, unknown>): BoundingBox | undefined {
   const west = toNumber(value.west);
   return north === undefined || south === undefined || east === undefined || west === undefined
     ? undefined
-    : { north, south, east, west };
+    : { north, south, east: east === -180 ? 180 : east, west: west === 180 ? -180 : west };
 }
 
 /** Checks the root key, then the Zod schema. */

@@ -16,6 +16,7 @@ import { searchPlacesTool } from '@/mcp-server/tools/definitions/search-places.t
 import { getFeatureCode } from '@/services/geonames/feature-codes.js';
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import {
+  type DeclaredError,
   declaredError,
   expectDeclaredError,
   expectInOrder,
@@ -27,6 +28,7 @@ import {
   PORTLAND_ROW,
   SEARCH_BODY,
   SEARCH_DOUGLAS_GB_BODY,
+  SEARCH_FIJI_CROSSING_BODY,
   SEARCH_SPARSE_BODY,
   SEARCH_UNDER_CAP_BODY,
   SEATTLE_ROW,
@@ -478,11 +480,29 @@ describe('input normalization', () => {
       ]);
     });
 
+    it('answers a box that does not cross the meridian as before, with no meridian fragment', async () => {
+      serve(SEARCH_UNDER_CAP_BODY);
+      const underCap = successOf<Page>(await run({ boundingBox: box }));
+      expect(underCap).toMatchObject({
+        effectiveQuery: 'boundingBox north 48 south 47 east -122 west -123',
+        totalCount: 2,
+        shown: 2,
+        truncated: false,
+      });
+      expect(underCap.notice).toBeUndefined();
+      serve();
+      const truncated = await run({ boundingBox: box });
+      expect(successOf<Page>(truncated).notice).toBe('540 more places; call again with offset 2.');
+      expect(allText(truncated).split('\n')).toContain(
+        '> 540 more places; call again with offset 2.',
+      );
+    });
+
     it.each([
       ['south equal to north', { north: 47, south: 47, east: -122, west: -123 }],
       ['south above north', { north: 47, south: 48, east: -122, west: -123 }],
       ['west equal to east', { north: 48, south: 47, east: -122, west: -122 }],
-      ['a box that crosses the 180° meridian', { north: 10, south: -10, east: -170, west: 170 }],
+      ['west 180 with east -180, one meridian', { north: 48, south: 47, east: -180, west: 180 }],
     ])('rejects %s before any request', async (_label, boundingBox) => {
       const fetchFake = serve();
       const error = errorOf(await run({ boundingBox }));
@@ -490,16 +510,245 @@ describe('input normalization', () => {
       expect(error.data).toMatchObject({
         reason: 'invalid_bounding_box',
         recovery: {
-          hint: 'Call geonames_search_places again with south below north and west below east; split a box that crosses the 180° meridian into two searches.',
+          hint: 'Call geonames_search_places again with south below north and west and east on different meridians: west -180 and east 180 cover every longitude, and west above east crosses the 180° meridian.',
         },
       });
-      expect(error.message).toContain('boundingBox needs south below north and west below east');
+      expect(error.message).toBe(
+        `boundingBox needs south below north, and west and east on different meridians; got north ${boundingBox.north}, south ${boundingBox.south}, east ${boundingBox.east}, west ${boundingBox.west}.`,
+      );
       expect(fetchFake).not.toHaveBeenCalled();
     });
 
-    it('accepts a degenerate-looking but valid box at the range limits', async () => {
-      serve();
-      successOf<Page>(await run({ boundingBox: { north: 90, south: -90, east: 180, west: -180 } }));
+    it('drops the advice to split a box from the declared contract, and says how to cross', () => {
+      const contract = declaredError(searchPlacesTool, 'invalid_bounding_box') as DeclaredError & {
+        when: string;
+      };
+      expect(contract.recovery).not.toContain('split');
+      expect(contract.recovery).toContain('west above east crosses the 180° meridian');
+      expect(contract.when).not.toContain('west greater than or equal to east');
+      expect(contract.when).toContain('west and east on the same meridian');
+    });
+
+    it('accepts a degenerate-looking but valid box at the range limits, which does not cross', async () => {
+      serve(SEARCH_UNDER_CAP_BODY);
+      const result = successOf<Page>(
+        await run({ boundingBox: { north: 90, south: -90, east: 180, west: -180 } }),
+      );
+      expect(result.notice).toBeUndefined();
+    });
+
+    describe('a box that crosses the 180° meridian (west above east)', () => {
+      const CROSSING = (west: number, east: number, span: number, rest: number) =>
+        `boundingBox crosses the 180° meridian (west ${west} is above east ${east}) and spans ${span}° of longitude; swap west and east to search the other ${rest}° instead.`;
+      const FIJI = { north: -16.8916, south: -18.7084, east: -179.146, west: 178.946 };
+      const RU = { north: 81.857323999, south: 41.185353, east: -169.05, west: 19.25 };
+
+      it.each([
+        ['Russia (geonames_get_countries)', RU, 171.7, 188.3],
+        [
+          'Fiji (geonames_get_countries)',
+          {
+            north: -12.4795295382484,
+            south: -20.673852409000002,
+            east: -178.432146772,
+            west: 177.140015279982,
+          },
+          4.428,
+          355.572,
+        ],
+        [
+          'Kiribati (geonames_get_countries)',
+          {
+            north: 3.93942799999973,
+            south: -11.4460499999991,
+            east: -150.2345115032905,
+            west: 169.548692,
+          },
+          40.217,
+          319.783,
+        ],
+        [
+          'Russia 2017370 (geonames_get_place)',
+          { north: 81.857323999, south: 41.185353, east: -168.996935519, west: 19.638789207000002 },
+          171.364,
+          188.636,
+        ],
+        [
+          'Fiji 2205218 (geonames_get_place)',
+          {
+            north: -12.461808995,
+            south: -21.042305430000003,
+            east: -178.229631742,
+            west: 176.87902300000002,
+          },
+          4.891,
+          355.109,
+        ],
+        [
+          'Kiribati 4030945 (geonames_get_place)',
+          { north: 4.69915999999972, south: -11.4460499999991, east: -150.191487, west: 169.52122 },
+          40.287,
+          319.713,
+        ],
+        [
+          'New Zealand 2186224 (geonames_get_place)',
+          {
+            north: -29.230643,
+            south: -52.62086205000001,
+            east: -175.83094670600002,
+            west: 165.868742201,
+          },
+          18.3,
+          341.7,
+        ],
+        [
+          'United States 6252001 (geonames_get_place)',
+          {
+            north: 71.386662492,
+            south: 18.910193684000003,
+            east: -66.94918572300003,
+            west: 172.436429978,
+          },
+          120.614,
+          239.386,
+        ],
+        [
+          'Chukotka 2126099 (geonames_get_place)',
+          {
+            north: 71.59774780273438,
+            south: 61.805824279785156,
+            east: -168.98974609375,
+            west: 157.68856811523438,
+          },
+          33.322,
+          326.678,
+        ],
+      ])(
+        'takes the %s box as it stands, sends its four bounds unchanged, and states the span',
+        async (_label, boundingBox, span, rest) => {
+          const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+          const result = await run({ featureCodes: 'PPLC', boundingBox });
+          expect(sent(fetchFake)).toEqual([
+            ['featureCode', 'PPLC'],
+            ['north', String(boundingBox.north)],
+            ['south', String(boundingBox.south)],
+            ['east', String(boundingBox.east)],
+            ['west', String(boundingBox.west)],
+            ...DEFAULT_PAGING,
+          ]);
+          const notice = CROSSING(boundingBox.west, boundingBox.east, span, rest);
+          expect(successOf<Page>(result).notice).toBe(notice);
+          expect(allText(result).split('\n')).toContain(`> ${notice}`);
+        },
+      );
+
+      it('accepts an east of -180 beside a west below 180, reading it as the meridian the box ends on', async () => {
+        const fetchFake = serve(SEARCH_UNDER_CAP_BODY);
+        const boundingBox = { north: 48, south: 47, east: -180, west: 170 };
+        const result = await run({ featureCodes: 'PPLC', boundingBox });
+        expect(sent(fetchFake)).toEqual([
+          ['featureCode', 'PPLC'],
+          ['north', '48'],
+          ['south', '47'],
+          ['east', '-180'],
+          ['west', '170'],
+          ...DEFAULT_PAGING,
+        ]);
+        expect(successOf<Page>(result).notice).toBe(CROSSING(170, -180, 10, 350));
+      });
+
+      it('returns the rows from both sides of the meridian, with the bounds echoed as sent', async () => {
+        serve(SEARCH_FIJI_CROSSING_BODY);
+        const result = successOf<Page>(await run({ featureClasses: 'P', boundingBox: FIJI }));
+        expect(result).toMatchObject({
+          effectiveQuery:
+            'featureClasses P · boundingBox north -16.8916 south -18.7084 east -179.146 west 178.946',
+          totalCount: 132,
+          shown: 2,
+          truncated: true,
+          nextOffset: 2,
+        });
+        expect(result.places.map(({ name, lng }) => [name, lng])).toEqual([
+          ['Levuka', 179.31667],
+          ['Natokalau', -179.28163],
+        ]);
+        expect(result.notice).toBe(
+          `${CROSSING(178.946, -179.146, 1.908, 358.092)} 130 more places; call again with offset 2.`,
+        );
+      });
+
+      it('pages with offset like any other box, the bounds sent unchanged on every page', async () => {
+        const fetchFake = serve({ totalResultsCount: 132, geonames: placeRows(32) });
+        const result = successOf<Page>(
+          await run({ featureClasses: 'P', boundingBox: FIJI, limit: 100, offset: 100 }),
+        );
+        expect(sent(fetchFake)).toEqual([
+          ['featureClass', 'P'],
+          ['north', '-16.8916'],
+          ['south', '-18.7084'],
+          ['east', '-179.146'],
+          ['west', '178.946'],
+          ['maxRows', '100'],
+          ['startRow', '100'],
+        ]);
+        expect(result).toMatchObject({ shown: 32, truncated: false });
+        expect(result).not.toHaveProperty('nextOffset');
+        expect(result.notice).toBe(CROSSING(178.946, -179.146, 1.908, 358.092));
+      });
+
+      it('names the crossing on a zero-hit page, ahead of the box advice', async () => {
+        serve(EMPTY_GEONAMES_BODY);
+        const result = await run({ featureCodes: 'PPLC', boundingBox: FIJI });
+        const notice = [
+          CROSSING(178.946, -179.146, 1.908, 358.092),
+          'No GeoNames place matched featureCodes PPLC · boundingBox north -16.8916 south -18.7084 east -179.146 west 178.946.',
+          'The feature filter may be too narrow; drop it, or check codes with geonames_list_reference topic feature_codes.',
+          'Only places inside the bounding box were searched; widen or drop boundingBox.',
+        ].join(' ');
+        expect(successOf<Page>(result)).toMatchObject({ totalCount: 0, shown: 0, notice });
+        expect(allText(result).split('\n')).toContain(`> ${notice}`);
+      });
+
+      it('names the crossing on a page past the end', async () => {
+        serve({ totalResultsCount: 132, geonames: [] });
+        const result = successOf<Page>(
+          await run({ featureClasses: 'P', boundingBox: FIJI, offset: 200 }),
+        );
+        expect(result.notice).toBe(
+          `${CROSSING(178.946, -179.146, 1.908, 358.092)} offset 200 is past the last result (132); call again with a smaller offset.`,
+        );
+      });
+
+      it('joins the crossing, clamp, paging, and outside-countries fragments in one notice, the crossing first', async () => {
+        const tongaRow = { ...SEATTLE_ROW, countryCode: 'TO', countryName: 'Tonga' };
+        serve({ totalResultsCount: 542, geonames: placeRows(100, tongaRow) });
+        const result = await run({ countries: ['FJ', 'US'], boundingBox: RU, limit: 200 });
+        const notice = [
+          CROSSING(19.25, -169.05, 171.7, 188.3),
+          CLAMP(200),
+          '442 more places; call again with offset 100.',
+          "This page also holds places in TO, which countries does not list: GeoNames returns the territories it files under a listed country, and each place's countryCode names its own country.",
+        ].join(' ');
+        expect(successOf<Page>(result)).toMatchObject({ cap: 100, truncated: true, notice });
+        const quoted = allText(result)
+          .split('\n')
+          .filter((line) => line.startsWith('>'));
+        expect(quoted).toEqual([`> ${notice}`]);
+      });
+
+      it('says in the input schema that west above east crosses the meridian, and that other tools’ boxes pass', () => {
+        const { boundingBox } = searchPlacesTool.input.shape;
+        expect(boundingBox.description).toBe(
+          'Keep only places inside this box. A box with west above east crosses the 180° meridian, as GeoNames reads it: west 170 and east -170 cover the 20° of longitude around it. Boxes from geonames_get_countries and geonames_get_place pass as they stand.',
+        );
+        const advertised = JSON.stringify(
+          z.toJSONSchema(searchPlacesTool.input, { io: 'input', target: 'draft-2020-12' }),
+        );
+        expect(advertised).not.toContain('cannot cross');
+        expect(advertised).toContain(
+          'Western longitude bound, decimal degrees, -180 to 180; below east, or above it for a box that crosses the 180° meridian.',
+        );
+      });
     });
 
     it.each([

@@ -42,7 +42,7 @@ const number = (value: number | undefined): string =>
 export const getCountriesTool = tool('geonames_get_countries', {
   title: 'GeoNames country facts',
   description:
-    "Get GeoNames country facts — ISO alpha-2, alpha-3, and numeric codes, FIPS code, geonameId, capital, population, area in km², continent, languages, currency, postal-code format, and mainland bounding box — for the countries named, a continent, or all 250. The geonameId anchors geonames_get_children (a country's first-level divisions) and geonames_get_hierarchy. The full table is fetched once a day (1 GeoNames credit) and cached.",
+    "Get GeoNames country facts — ISO alpha-2, alpha-3, and numeric codes, FIPS code, geonameId, capital, population, area in km², continent, languages, currency, postal-code format, and GeoNames' bounding box for the country (a rectangle that can take in neighboring land and leave out outlying territory) — for the countries named, a continent, or all 250. The geonameId anchors geonames_get_children (a country's first-level divisions) and geonames_get_hierarchy. The full table is fetched once a day (1 GeoNames credit) and cached.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     countries: listInput(
@@ -129,7 +129,9 @@ export const getCountriesTool = tool('geonames_get_countries', {
                 east: z.number().describe('Eastern longitude bound, decimal degrees.'),
                 west: z.number().describe('Western longitude bound, decimal degrees.'),
               })
-              .describe("Bounding box of the country's mainland."),
+              .describe(
+                "GeoNames' rectangle for the country, which can take in neighboring land and leave out outlying territory: the United States box covers the contiguous states, while geonames_get_place 6252001's spans Alaska and Hawaii. A box with west above east crosses the 180° meridian (Fiji, Kiribati, Russia); geonames_search_places takes it as it stands.",
+              ),
           })
           .describe('One country.'),
       )

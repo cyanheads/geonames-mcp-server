@@ -13,6 +13,7 @@ import { getCountriesTool } from '@/mcp-server/tools/definitions/get-countries.t
 import { getGeoNamesService } from '@/services/geonames/geonames-service.js';
 import {
   CALLER_USERNAME,
+  COUNTRY_MERIDIAN_BODY,
   COUNTRY_SPARSE_BODY,
   COUNTRY_TABLE_BODY,
   COUNTRY_TABLE_WITH_KOSOVO_BODY,
@@ -605,6 +606,43 @@ describe('the country table', () => {
     ]);
     expect(tableRows(textOf(result))[2]).toBe(
       '| BV / BVT / — / — | Bouvet Island | 3371123 | Not available | Antarctica (AN) | Not available | Not available | Not available | Not available | Not available | -54.4 / -54.46 / 3.49 / 3.34 |',
+    );
+  });
+
+  it("relays New Zealand's box, which ends on the 180° meridian, with east 180, on both surfaces", async () => {
+    serve(COUNTRY_MERIDIAN_BODY);
+    const result = await run({ countries: 'NZ' });
+    expect(successOf<Page>(result).countries[0]?.boundingBox).toEqual({
+      north: -34.392812824,
+      south: -47.290029537,
+      east: 180,
+      west: 166.72353,
+    });
+    expect(tableRows(textOf(result))[2]).toContain(
+      '| -34.392812824 / -47.290029537 / 180 / 166.72353 |',
+    );
+  });
+
+  it('keeps west above east on the Fiji, Kiribati, and Russia boxes, and not on New Zealand, which ends at the meridian', async () => {
+    serve(COUNTRY_MERIDIAN_BODY);
+    const result = await run({});
+    const crossing = successOf<Page>(result)
+      .countries.filter(({ boundingBox }) => boundingBox.west > boundingBox.east)
+      .map(({ countryCode }) => countryCode);
+    expect(crossing).toEqual(['FJ', 'KI', 'RU']);
+    expect(tableRows(textOf(result))[5]).toContain(
+      '| 81.857323999 / 41.185353 / -169.05 / 19.25 |',
+    );
+  });
+
+  it('says what the box is, not "mainland", and that west above east crosses the meridian', () => {
+    expect(getCountriesTool.description).not.toContain('mainland');
+    expect(getCountriesTool.description).toContain(
+      "GeoNames' bounding box for the country (a rectangle that can take in neighboring land and leave out outlying territory)",
+    );
+    const box = getCountriesTool.output.shape.countries.element.shape.boundingBox;
+    expect(box.description).toBe(
+      "GeoNames' rectangle for the country, which can take in neighboring land and leave out outlying territory: the United States box covers the contiguous states, while geonames_get_place 6252001's spans Alaska and Hawaii. A box with west above east crosses the 180° meridian (Fiji, Kiribati, Russia); geonames_search_places takes it as it stands.",
     );
   });
 

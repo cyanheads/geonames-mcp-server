@@ -690,6 +690,60 @@ describe('format()', () => {
     expect(rendered).toContain('- Emerald City — untagged');
   });
 
+  it('relays a box that crosses the 180° meridian as sent, and an east of -180 as 180, on both surfaces', async () => {
+    serve(GET_SOUTH_PACIFIC_BODY);
+    const crossing = await run({ geonameId: '4030483' });
+    expect(placeOf(crossing).boundingBox).toEqual({
+      north: 1.984193921089172,
+      south: -85.582763671875,
+      east: -66.51908111572266,
+      west: 131.0236358642578,
+    });
+    expect(textOf(crossing)).toContain(
+      '- **Bounding box:** north 1.984193921089172, south -85.582763671875, east -66.51908111572266, west 131.0236358642578\n',
+    );
+    serve({ ...GET_SOUTH_PACIFIC_BODY, bbox: { ...GET_SOUTH_PACIFIC_BODY.bbox, east: -180 } });
+    const ending = await run({ geonameId: '4030483' });
+    expect(placeOf(ending).boundingBox).toMatchObject({ east: 180, west: 131.0236358642578 });
+    expect(textOf(ending)).toContain('east 180, west 131.0236358642578\n');
+  });
+
+  it.each([
+    [
+      'a continent, with a continent and no country',
+      GET_ASIA_BODY,
+      '6255147',
+      'Not available · continent AS',
+    ],
+    ['Earth, with neither', GET_EARTH_BODY, '6295630', 'Not available'],
+    [
+      'Seattle, with a country',
+      GET_SEATTLE_BODY,
+      '5809844',
+      'United States (US) geonameId 6252001 · continent NA',
+    ],
+  ])('renders the Country line of %s', async (_label, body, geonameId, line) => {
+    serve(body);
+    const result = await run({ geonameId });
+    expect(textOf(result).split('\n')).toContain(`- **Country:** ${line}`);
+  });
+
+  it('leaves structuredContent of a continent as it was: a continent code and no country fields', async () => {
+    serve(GET_ASIA_BODY);
+    const place = placeOf(await run({ geonameId: '6255147' }));
+    expect(place.continentCode).toBe('AS');
+    expect(place).not.toHaveProperty('countryName');
+    expect(place).not.toHaveProperty('countryCode');
+    expect(place).not.toHaveProperty('countryGeonameId');
+  });
+
+  it('says in the output schema that west above east crosses the meridian', () => {
+    const { boundingBox } = getPlaceTool.output.shape.place.unwrap().shape;
+    expect(boundingBox.description).toBe(
+      'Bounding box of the feature. A box with west above east crosses the 180° meridian; geonames_search_places takes it as it stands. Absent for most points.',
+    );
+  });
+
   it('renders Not available and None recorded or returned for what a sparse body lacks', async () => {
     serve(GET_SPARSE_BODY);
     const rendered = textOf(await run({ geonameId: '2643743' }));

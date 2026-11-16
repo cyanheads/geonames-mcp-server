@@ -160,12 +160,14 @@ export const searchPlacesTool = tool('geonames_search_places', {
           west: bound()
             .min(-180)
             .max(180)
-            .describe('Western longitude bound, decimal degrees, -180 to 180; below east.'),
+            .describe(
+              'Western longitude bound, decimal degrees, -180 to 180; below east, or above it for a box that crosses the 180° meridian.',
+            ),
         })
         .strict()
         .optional(),
     ).describe(
-      'Keep only places inside this box. The box cannot cross the 180° meridian: split such an area into two searches.',
+      'Keep only places inside this box. A box with west above east crosses the 180° meridian, as GeoNames reads it: west 170 and east -170 cover the 20° of longitude around it. Boxes from geonames_get_countries and geonames_get_place pass as they stand.',
     ),
     orderBy: blankAsUnset(lowerCased(z.enum(['relevance', 'population']).optional())).describe(
       "Result order: relevance or population, largest first. Omit it for GeoNames' own order, which matches relevance except with match name_prefix.",
@@ -253,7 +255,7 @@ export const searchPlacesTool = tool('geonames_search_places', {
       .string()
       .optional()
       .describe(
-        'Guidance: why nothing matched, or how to reach the next page (naming a limit held to 100), and which places on the page lie in countries that countries does not list.',
+        'Guidance: the longitude span of a boundingBox that crosses the 180° meridian, why nothing matched, or how to reach the next page (naming a limit held to 100), and which places on the page lie in countries that countries does not list.',
       ),
   },
   enrichmentTrailer: {
@@ -311,9 +313,9 @@ export const searchPlacesTool = tool('geonames_search_places', {
     {
       reason: 'invalid_bounding_box',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'boundingBox has south greater than or equal to north, or west greater than or equal to east.',
+      when: 'boundingBox has south greater than or equal to north, or west and east on the same meridian (equal, or west 180 with east -180), which could mean a box of no width or one around the globe.',
       recovery:
-        'Call geonames_search_places again with south below north and west below east; split a box that crosses the 180° meridian into two searches.',
+        'Call geonames_search_places again with south below north and west and east on different meridians: west -180 and east 180 cover every longitude, and west above east crosses the 180° meridian.',
       severity: 'notice',
     },
     {
@@ -443,11 +445,14 @@ export const searchPlacesTool = tool('geonames_search_places', {
     }
     if (
       boundingBox !== undefined &&
-      (boundingBox.south >= boundingBox.north || boundingBox.west >= boundingBox.east)
+      (boundingBox.south >= boundingBox.north ||
+        boundingBox.west === boundingBox.east ||
+        // -180 and 180 name one meridian, so this box too has no width or circles the globe.
+        (boundingBox.west === 180 && boundingBox.east === -180))
     ) {
       throw ctx.fail(
         'invalid_bounding_box',
-        `boundingBox needs south below north and west below east; got north ${boundingBox.north}, south ${boundingBox.south}, east ${boundingBox.east}, west ${boundingBox.west}.`,
+        `boundingBox needs south below north, and west and east on different meridians; got north ${boundingBox.north}, south ${boundingBox.south}, east ${boundingBox.east}, west ${boundingBox.west}.`,
       );
     }
 
@@ -478,8 +483,18 @@ export const searchPlacesTool = tool('geonames_search_places', {
     const more = shown > 0 && next < totalCount;
     /** Past the cap, offset 5000 is still a page: it repeats this page's tail, then reaches row `next`. */
     const nextOffset = more && input.offset < MAX_OFFSET ? Math.min(next, MAX_OFFSET) : undefined;
-    /** The notice's fragments: clamp, continuation, outside countries; or the zero-hit notice alone. */
+    /**
+     * The notice's fragments: a meridian crossing on every page, then clamp, continuation,
+     * and outside countries, or the zero-hit notice.
+     */
     const fragments: string[] = [];
+    if (boundingBox !== undefined && boundingBox.west > boundingBox.east) {
+      // GeoNames reads west above east as crossing the 180° meridian; the span shows swapped bounds.
+      const gap = boundingBox.west - boundingBox.east;
+      fragments.push(
+        `boundingBox crosses the 180° meridian (west ${boundingBox.west} is above east ${boundingBox.east}) and spans ${Number((360 - gap).toFixed(3))}° of longitude; swap west and east to search the other ${Number(gap.toFixed(3))}° instead.`,
+      );
+    }
     ctx.enrich.total(totalCount);
     ctx.enrich({ shown });
     if (more) {

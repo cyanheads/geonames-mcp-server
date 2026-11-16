@@ -164,7 +164,9 @@ export const getPlaceTool = tool('geonames_get_place', {
             west: z.number().describe('Western longitude bound, decimal degrees.'),
           })
           .optional()
-          .describe('Bounding box of the feature. Absent for most points.'),
+          .describe(
+            'Bounding box of the feature. A box with west above east crosses the 180° meridian; geonames_search_places takes it as it stands. Absent for most points.',
+          ),
         wikipediaUrl: z
           .string()
           .optional()
@@ -328,10 +330,11 @@ export const getPlaceTool = tool('geonames_get_place', {
         place.countryName && inlineText(place.countryName),
         place.countryCode && `(${inlineText(place.countryCode)})`,
         place.countryGeonameId !== undefined && `geonameId ${place.countryGeonameId}`,
-        place.continentCode && `· continent ${inlineText(place.continentCode)}`,
       ]
         .filter(Boolean)
         .join(' ');
+      const continent =
+        place.continentCode === undefined ? '' : ` · continent ${inlineText(place.continentCode)}`;
       const elevation = [
         place.elevationInMeters !== undefined && `${place.elevationInMeters} m recorded`,
         place.demElevationInMeters !== undefined && `${place.demElevationInMeters} m DEM (SRTM3)`,
@@ -349,7 +352,7 @@ export const getPlaceTool = tool('geonames_get_place', {
         `- **ASCII name:** ${orNotAvailable(place.asciiName)}`,
         `- **Coordinates:** ${place.lat === undefined || place.lng === undefined ? 'Not available' : `${place.lat}, ${place.lng}`}`,
         `- **Feature:** ${feature || 'Not available'}`,
-        `- **Country:** ${country || 'Not available'}`,
+        `- **Country:** ${country || 'Not available'}${continent}`,
         `- **ISO 3166-2 (first level):** ${orNotAvailable(place.iso3166_2)}`,
         `- **Population:** ${place.population === undefined ? 'Not available' : place.population.toLocaleString('en-US')}`,
         `- **Elevation:** ${elevation.join(' · ') || 'Not available'}`,

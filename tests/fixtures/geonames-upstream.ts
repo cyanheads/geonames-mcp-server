@@ -622,6 +622,68 @@ export const COUNTRY_INFO_BODY = {
   ],
 };
 
+/**
+ * `countryInfoJSON` rows at the 180° meridian, bounds as received (other fields trimmed):
+ * Fiji, Kiribati, and Russia cross it (`west` above `east`); New Zealand's box ends on it,
+ * written as `east: -180`.
+ */
+export const COUNTRY_MERIDIAN_BODY = {
+  geonames: [
+    {
+      continent: 'OC',
+      capital: 'Suva',
+      geonameId: 2205218,
+      south: -20.673852409000002,
+      isoAlpha3: 'FJI',
+      north: -12.4795295382484,
+      east: -178.432146772,
+      countryCode: 'FJ',
+      west: 177.140015279982,
+      countryName: 'Fiji',
+      continentName: 'Oceania',
+    },
+    {
+      continent: 'OC',
+      capital: 'Tarawa',
+      geonameId: 4030945,
+      south: -11.4460499999991,
+      isoAlpha3: 'KIR',
+      north: 3.93942799999973,
+      east: -150.2345115032905,
+      countryCode: 'KI',
+      west: 169.548692,
+      countryName: 'Kiribati',
+      continentName: 'Oceania',
+    },
+    {
+      continent: 'OC',
+      capital: 'Wellington',
+      geonameId: 2186224,
+      south: -47.290029537,
+      isoAlpha3: 'NZL',
+      north: -34.392812824,
+      east: -180,
+      countryCode: 'NZ',
+      west: 166.72353,
+      countryName: 'New Zealand',
+      continentName: 'Oceania',
+    },
+    {
+      continent: 'EU',
+      capital: 'Moscow',
+      geonameId: 2017370,
+      south: 41.185353,
+      isoAlpha3: 'RUS',
+      north: 81.857323999,
+      east: -169.05,
+      countryCode: 'RU',
+      west: 19.25,
+      countryName: 'Russia',
+      continentName: 'Europe',
+    },
+  ],
+};
+
 /** `postalCodeCountryInfoJSON`: full forms for GB, prefixes only for IE. */
 export const POSTAL_COUNTRIES_BODY = {
   geonames: [
@@ -653,6 +715,53 @@ export const POSTAL_COUNTRIES_BODY = {
 export const SEARCH_UNDER_CAP_BODY = {
   totalResultsCount: 2,
   geonames: [SEATTLE_ROW, PORTLAND_ROW],
+};
+
+/**
+ * `searchJSON` for featureClass P in the box west 178.946, east -179.146 (north -16.8916,
+ * south -18.7084), which crosses the 180° meridian, as received: its total and one row from
+ * each side of the meridian.
+ */
+export const SEARCH_FIJI_CROSSING_BODY = {
+  totalResultsCount: 132,
+  geonames: [
+    {
+      adminCode1: '02',
+      lng: '179.31667',
+      geonameId: 2204417,
+      toponymName: 'Levuka',
+      countryId: '2205218',
+      fcl: 'P',
+      population: 8360,
+      countryCode: 'FJ',
+      name: 'Levuka',
+      fclName: 'city, village,...',
+      adminCodes1: { ISO3166_2: 'E' },
+      countryName: 'Fiji',
+      fcodeName: 'seat of a first-order administrative division',
+      adminName1: 'Eastern',
+      lat: '-18.06667',
+      fcode: 'PPLA',
+    },
+    {
+      adminCode1: '02',
+      lng: '-179.28163',
+      geonameId: 4035874,
+      toponymName: 'Natokalau',
+      countryId: '2205218',
+      fcl: 'P',
+      population: 0,
+      countryCode: 'FJ',
+      name: 'Natokalau',
+      fclName: 'city, village,...',
+      adminCodes1: { ISO3166_2: 'E' },
+      countryName: 'Fiji',
+      fcodeName: 'populated place',
+      adminName1: 'Eastern',
+      lat: '-17.74071',
+      fcode: 'PPL',
+    },
+  ],
 };
 
 /** `searchJSON` with nothing but the three fields every row must carry. */

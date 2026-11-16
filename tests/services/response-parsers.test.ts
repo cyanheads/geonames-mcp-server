@@ -21,6 +21,7 @@ import {
 import {
   COUNTRY_INFO_BODY,
   COUNTRY_KOSOVO_ROW,
+  COUNTRY_MERIDIAN_BODY,
   GET_MONACO_COUNTRY_BODY,
   GET_MONTE_CARLO_BODY,
   GET_SEATTLE_BODY,
@@ -289,6 +290,26 @@ describe('parsePlace', () => {
     expect(parsePlace({ ...base, bbox: { north: 1, south: 0, east: 1 } })).not.toHaveProperty(
       'boundingBox',
     );
+  });
+
+  it.each([
+    ['east -180 as 180', { east: -180, west: 166.5 }, { east: 180, west: 166.5 }],
+    ['west 180 as -180', { east: -170.25, west: 180 }, { east: -170.25, west: -180 }],
+    [
+      'string bounds of ±180 the same way',
+      { east: '-180', west: '180' },
+      { east: 180, west: -180 },
+    ],
+    ['east 180 and west -180 as sent', { east: 180, west: -180 }, { east: 180, west: -180 }],
+    [
+      'a box that crosses the meridian as sent',
+      { east: -168.996935519, west: 19.638789207 },
+      { east: -168.996935519, west: 19.638789207 },
+    ],
+  ])("relays a place box's %s", (_label, bounds, expected) => {
+    const base = { geonameId: 1, name: 'n', toponymName: 'n' };
+    const { boundingBox } = parsePlace({ ...base, bbox: { north: 10, south: -10, ...bounds } });
+    expect(boundingBox).toEqual({ north: 10, south: -10, ...expected });
   });
 
   it('builds admin levels only where a code or a name exists, never from placeholders', () => {
@@ -807,6 +828,37 @@ describe('parseCountries', () => {
       languages: ['aa', 'bb', 'cc'],
       boundingBox: { north: 2, south: 1, east: 4, west: 3 },
     });
+  });
+
+  it("relays New Zealand's east -180 as 180, and keeps the boxes that cross the meridian as sent", () => {
+    const boxes = Object.fromEntries(
+      parseCountries(COUNTRY_MERIDIAN_BODY).map(({ countryCode, boundingBox }) => [
+        countryCode,
+        boundingBox,
+      ]),
+    );
+    expect(boxes).toEqual({
+      FJ: {
+        north: -12.4795295382484,
+        south: -20.673852409000002,
+        east: -178.432146772,
+        west: 177.140015279982,
+      },
+      KI: {
+        north: 3.93942799999973,
+        south: -11.4460499999991,
+        east: -150.2345115032905,
+        west: 169.548692,
+      },
+      NZ: { north: -34.392812824, south: -47.290029537, east: 180, west: 166.72353 },
+      RU: { north: 81.857323999, south: 41.185353, east: -169.05, west: 19.25 },
+    });
+  });
+
+  it('relays a country row whose west is 180 as -180', () => {
+    const [row] = COUNTRY_MERIDIAN_BODY.geonames;
+    const [country] = parseCountries({ geonames: [{ ...row, west: '180', east: '-170' }] });
+    expect(country?.boundingBox).toMatchObject({ west: -180, east: -170 });
   });
 
   it('gives an empty language list for a blank languages field', () => {
