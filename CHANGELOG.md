@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-11-15
+
+geonames_search_places accepts a boundingBox with west above east as crossing the 180° meridian, geonames_reverse_geocode prints one such box when a full nearby page's radius meets the meridian, and the Country line of a continent record names the missing country.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-29
 
 Publishes the geonames-guide agent skill over MCP, prints the search call that lists a full nearby page, notes the timezone of countryless records, rejects nameContains with no letter or digit, and keeps URLs as written in content[].
