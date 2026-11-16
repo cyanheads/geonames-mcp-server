@@ -4,7 +4,7 @@ description: Gates and identifier crossings for the geonames_* gazetteer tools. 
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -42,7 +42,7 @@ Where `geonames_get_place` lists a `wkdt` identifier, it is the Wikidata QID for
 
 4. **No population threshold exists above 15,000.** The `cities` tiers stop at 15,000. For "places over 100,000", sort with `orderBy` population and stop paging at the first row below the threshold.
 
-5. **Search inside a division with admin codes, not its box.** A bounding box is the rectangle around a division, so it takes in the neighbours. In one probe, the box from Texas's own record (4736286) matched about a third more airports than `countries` US with `adminCode1` TX. Its first page held airports in New Mexico, Arkansas, Oklahoma, Louisiana, and Mexico. For a country, use `countries`: the `geonames_get_countries` box is a rectangle too, and for Russia, Fiji, Kiribati, and New Zealand it crosses the 180° meridian, which search rejects. Use a box only where no admin code fits, such as around a point, or where the admin-code search returns only the division itself: City of Algona, WA (ADM3 `7172907`) matched just itself by `adminCode3`, while its box held the town (PPL), a school, and a church.
+5. **Search inside a division with admin codes, not its box.** A bounding box is the rectangle around a division, so it takes in the neighbours. In one probe, the box from Texas's own record (4736286) matched about a third more airports than `countries` US with `adminCode1` TX. Its first page held airports in New Mexico, Arkansas, Oklahoma, Louisiana, and Mexico. For a country, use `countries`: the `geonames_get_countries` box is a rectangle too, and for Fiji, Kiribati, and Russia it crosses the 180° meridian (`west` above `east`), which search takes as it stands. Use a box only where no admin code fits, such as around a point, or where the admin-code search returns only the division itself: City of Algona, WA (ADM3 `7172907`) matched just itself by `adminCode3`, while its box held the town (PPL), a school, and a church.
 
 6. **Check for a microstate or enclave before naming the country.** Containment polygons do not always carve them out. A point inside Vatican City returned Italy, Lazio, and Rome, down to Trionfale. Its nearest populated place, 0.09 km away, was Vatican City (PPLC, `countryCode` VA). When the nearest place a few hundred metres away carries another `countryCode`, report both rather than the containing country alone.
 
@@ -51,7 +51,7 @@ Where `geonames_get_place` lists a `wkdt` identifier, it is the Wikidata QID for
 8. **Nearest-place lists cannot be continued in distance order.** `geonames_reverse_geocode` lists at most the nearest 50 and does not page. Mode `nearby` of `geonames_find_postal_codes` lists at most 100 and takes no `offset`. Search orders only by relevance or population. In a dense city the cap covers little ground: in one probe, the nearest 8 places to downtown Seattle all lay within 1.2 km. To list every place or feature within a radius:
    1. Run the `geonames_search_places` call that the full-page notice of `geonames_reverse_geocode` prints; its box encloses the circle.
    2. Page to the end. The search reaches its first 5,100 rows, so split the box when `totalCount` runs past that.
-   3. Compute each row's distance from its `lat`/`lng`, and keep the rows inside the radius. Drop sections by `featureCode` only before you rank or sum populations (Gate 3).
+   3. Compute each row's distance from its `lat`/`lng`, and keep the rows inside the radius. GeoNames' own distances run up to about 0.5% shorter than a haversine on a 6,371 km sphere, so allow that much slack at the edge. Drop sections by `featureCode` only before you rank or sum populations (Gate 3).
 
    Postal codes have no such route: `geonames_find_postal_codes` takes no box, and a call from another point returns that point's nearest 100.
 

@@ -48,7 +48,7 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, link
 
 ### `geonames_search_places` <sub>tool</sub>
 
-- `query` (up to 200 characters) compared per `match`: `name_required` (default), `any_field`, `exact_name`, or `name_prefix`; filters `countries` (up to 10, by ISO alpha-2, alpha-3, or numeric code), `adminCode1`–`adminCode4`, `featureClasses`, `featureCodes` (up to 20), `cities` (`cities1000` / `cities5000` / `cities15000`), and `boundingBox`. A call needs `query` or one of `countries`, `featureClasses`, `featureCodes`, `boundingBox`
+- `query` (up to 200 characters) compared per `match`: `name_required` (default), `any_field`, `exact_name`, or `name_prefix`; filters `countries` (up to 10, by ISO alpha-2, alpha-3, or numeric code), `adminCode1`–`adminCode4`, `featureClasses`, `featureCodes` (up to 20), `cities` (`cities1000` / `cities5000` / `cities15000`), and `boundingBox` (`west` above `east` crosses the 180° meridian, and the notice gives the longitude span). A call needs `query` or one of `countries`, `featureClasses`, `featureCodes`, `boundingBox`
 - A listed country also returns the territories GeoNames files under it (`GB` also returns IM, GG, JE, and GS), each place under its own `countryCode`; the notice names any country on the page that `countries` does not list
 - `adminCode1`–`adminCode4` search inside an admin division by its GeoNames code, as `geonames_get_place` and `geonames_reverse_geocode` return it in `adminLevels` (`countries: ["US"], adminCode1: "TX", featureCodes: ["AIRP"]` lists Texas airports). Codes are case-insensitive and zero padding counts (`02`, not `2`); they are not ISO 3166-2 or postal codes (Bavaria is `02`, not `BY`). Each needs exactly one country, and levels 2–4 need `adminCode1`
 - `limit` 1–1,000 (default 10), held to 100 per call with a notice when more remain; `offset` 0–5000, `orderBy` `relevance` or `population` (omitted, GeoNames' own order); returns `totalCount`, `effectiveQuery`, and `nextOffset`
@@ -108,7 +108,7 @@ The [GeoNames](https://www.geonames.org/) gazetteer: 13M+ places worldwide, link
 ### `geonames_get_countries` <sub>tool</sub>
 
 - Up to 250 `countries` by ISO alpha-2, alpha-3, or numeric code, a `continent`, `nameContains`, or no filter for all 250; `limit` 1–1,000 (default 50), held to 250 per call, with `offset`; a `nameContains` with no letter or digit fails before any request as `name_contains_unsearchable`
-- Rows carry ISO and FIPS codes, `geonameId` (the starting point for `geonames_get_children`), capital, population, area, continent, languages, currency, postal-code format, and mainland bounding box; unknown codes land in `notFound`
+- Rows carry ISO and FIPS codes, `geonameId` (the starting point for `geonames_get_children`), capital, population, area, continent, languages, currency, postal-code format, and GeoNames' bounding box for the country (a rectangle that can take in neighboring land and leave out outlying territory); unknown codes land in `notFound`
 
 ---
 
@@ -141,7 +141,6 @@ Known limitations:
 - **Children cap at 1,000 per parent.**
 - **Postal data covers 122 countries.** Ireland and Malta return only code prefixes. US nearby lookups place the first row at the query point rather than the ZIP centroid.
 - **Nearby radius tops out at 300 km** for places and features and 30 km for postal codes, GeoNames' free-tier ceilings.
-- **Bounding boxes cannot cross the 180° meridian.** Split such an area into two searches.
 - **Coastal points can resolve to the ocean without a buffer.** By default only a country that contains the point matches, so a harbor or shoreline point just outside the outline returns the sea while its nearby places are on land. Set `coastalBufferKm` (up to 50) to match the nearest country instead; in a strait that can be either shore.
 - **Microstates and enclaves can resolve to the surrounding country.** A point inside Vatican City returns Italy.
 - **Nearest populated places include sections and historical places.** In a dense city the nearest rows are often `PPLX` quarters or `PPLH` former districts; each row's `featureCode` says which. `cities` restricts to places above a population tier, but a city section (`PPLX`) with its own population passes it.
@@ -216,7 +215,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 - **Clone and install:**
 
